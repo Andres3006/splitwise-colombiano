@@ -10,3 +10,7 @@ app.get('/', (req, res) => {
 app.listen(3000, () => {
   console.log('Servidor en puerto 3000');
 });
+
+app.get('/test', (req, res) => {
+  res.send('Funciona endpoint test');
+});
