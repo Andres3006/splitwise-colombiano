@@ -6,6 +6,8 @@ const testRoutes = require('./routes/test.routes');
 const authRoutes = require('./routes/auth.routes');
 const expensesRoutes = require('./routes/expenses.routes');
 const balancesRoutes = require('./routes/balances.routes');
+const groupsRoutes = require('./routes/groups.routes');
+const dashboardRoutes = require('./routes/dashboard.routes');
 const verifyToken = require('./middlewares/auth.middleware');
 
 const app = express();
@@ -16,6 +18,8 @@ app.use('/api', testRoutes);
 app.use('/api/auth', authRoutes);
 app.use('/api/expenses', expensesRoutes);
 app.use('/api/balances', balancesRoutes);
+app.use('/api/groups', groupsRoutes);
+app.use('/api/dashboard', dashboardRoutes);
 
 app.get('/', (req, res) => {
     res.send('API funcionando');

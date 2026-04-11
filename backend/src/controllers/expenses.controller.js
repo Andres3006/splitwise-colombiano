@@ -37,6 +37,140 @@ const validateGroupMembers = async (client, groupId, userIds) => {
     return new Set(result.rows.map((row) => row.user_id));
 };
 
+const getBalancesByUser = async (userId, groupId = null) => {
+    const params = [userId];
+    let groupFilter = '';
+
+    if (groupId) {
+        params.push(groupId);
+        groupFilter = 'AND b.group_id = $2';
+    }
+
+    return pool.query(
+        `SELECT
+            b.id,
+            b.group_id,
+            b.debtor_id,
+            debtor.name AS debtor_name,
+            b.creditor_id,
+            creditor.name AS creditor_name,
+            b.amount,
+            b.updated_at
+         FROM balances b
+         JOIN users debtor ON debtor.id = b.debtor_id
+         JOIN users creditor ON creditor.id = b.creditor_id
+         WHERE (b.debtor_id = $1 OR b.creditor_id = $1)
+         ${groupFilter}
+         ORDER BY b.updated_at DESC`,
+        params
+    );
+};
+
+const assertGroupMembership = async (userId, groupId) => {
+    const membershipResult = await pool.query(
+        `SELECT id
+         FROM group_members
+         WHERE group_id = $1
+           AND user_id = $2
+           AND left_at IS NULL
+         LIMIT 1`,
+        [groupId, userId]
+    );
+
+    return membershipResult.rows.length > 0;
+};
+
+const getBalancesForOptimization = async (userId, groupId = null) => {
+    if (!groupId) {
+        return getBalancesByUser(userId, null);
+    }
+
+    const isMember = await assertGroupMembership(userId, groupId);
+    if (!isMember) {
+        const error = new Error('No perteneces a este grupo');
+        error.statusCode = 403;
+        throw error;
+    }
+
+    return pool.query(
+        `SELECT
+            b.id,
+            b.group_id,
+            b.debtor_id,
+            debtor.name AS debtor_name,
+            b.creditor_id,
+            creditor.name AS creditor_name,
+            b.amount,
+            b.updated_at
+         FROM balances b
+         JOIN users debtor ON debtor.id = b.debtor_id
+         JOIN users creditor ON creditor.id = b.creditor_id
+         WHERE b.group_id = $1
+         ORDER BY b.updated_at DESC`,
+        [groupId]
+    );
+};
+
+const optimizeBalances = (balances) => {
+    const netMap = new Map();
+
+    for (const balance of balances) {
+        const amount = Number(balance.amount);
+
+        netMap.set(
+            balance.debtor_id,
+            roundToTwo((netMap.get(balance.debtor_id) || 0) - amount)
+        );
+        netMap.set(
+            balance.creditor_id,
+            roundToTwo((netMap.get(balance.creditor_id) || 0) + amount)
+        );
+    }
+
+    const debtors = [];
+    const creditors = [];
+
+    for (const [userId, netAmount] of netMap.entries()) {
+        if (netAmount < 0) {
+            debtors.push({ user_id: userId, amount: roundToTwo(Math.abs(netAmount)) });
+        } else if (netAmount > 0) {
+            creditors.push({ user_id: userId, amount: roundToTwo(netAmount) });
+        }
+    }
+
+    debtors.sort((a, b) => b.amount - a.amount);
+    creditors.sort((a, b) => b.amount - a.amount);
+
+    const optimizedPayments = [];
+    let debtorIndex = 0;
+    let creditorIndex = 0;
+
+    while (debtorIndex < debtors.length && creditorIndex < creditors.length) {
+        const debtor = debtors[debtorIndex];
+        const creditor = creditors[creditorIndex];
+        const amount = roundToTwo(Math.min(debtor.amount, creditor.amount));
+
+        optimizedPayments.push({
+            from_user: debtor.user_id,
+            to_user: creditor.user_id,
+            amount
+        });
+
+        debtor.amount = roundToTwo(debtor.amount - amount);
+        creditor.amount = roundToTwo(creditor.amount - amount);
+
+        if (debtor.amount === 0) {
+            debtorIndex += 1;
+        }
+
+        if (creditor.amount === 0) {
+            creditorIndex += 1;
+        }
+    }
+
+    return optimizedPayments;
+};
+
 const upsertBalance = async (client, { groupId, debtorId, creditorId, amount }) => {
     if (debtorId === creditorId || amount <= 0) {
         return;
@@ -250,32 +384,7 @@ const createExpense = async (req, res) => {
 const getMyBalances = async (req, res) => {
     try {
         const { group_id: groupId } = req.query;
-        const params = [req.user.id];
-        let groupFilter = '';
-
-        if (groupId) {
-            params.push(groupId);
-            groupFilter = 'AND b.group_id = $2';
-        }
-
-        const result = await pool.query(
-            `SELECT
-                b.id,
-                b.group_id,
-                b.debtor_id,
-                debtor.name AS debtor_name,
-                b.creditor_id,
-                creditor.name AS creditor_name,
-                b.amount,
-                b.updated_at
-             FROM balances b
-             JOIN users debtor ON debtor.id = b.debtor_id
-             JOIN users creditor ON creditor.id = b.creditor_id
-             WHERE (b.debtor_id = $1 OR b.creditor_id = $1)
-             ${groupFilter}
-             ORDER BY b.updated_at DESC`,
-            params
-        );
+        const result = await getBalancesByUser(req.user.id, groupId);
 
         const summary = result.rows.reduce(
             (accumulator, balance) => {
@@ -309,7 +418,84 @@ const getMyBalances = async (req, res) => {
     }
 };
 
+const getOptimizedPayments = async (req, res) => {
+    try {
+        const { group_id: groupId } = req.query;
+        const balanceResult = await getBalancesForOptimization(req.user.id, groupId);
+        const optimizedPayments = optimizeBalances(balanceResult.rows);
+
+        return res.json({
+            original_transfers: balanceResult.rows.length,
+            optimized_transfers: optimizedPayments.length,
+            reduction: balanceResult.rows.length - optimizedPayments.length,
+            payments: optimizedPayments
+        });
+    } catch (error) {
+        return res.status(error.statusCode || 500).json({ error: error.message });
+    }
+};
+
+const getDashboard = async (req, res) => {
+    try {
+        const [balanceResult, groupsResult, expensesResult] = await Promise.all([
+            getBalancesByUser(req.user.id),
+            pool.query(
+                `SELECT COUNT(*) AS total
+                 FROM group_members
+                 WHERE user_id = $1
+                   AND left_at IS NULL`,
+                [req.user.id]
+            ),
+            pool.query(
+                `SELECT COUNT(*) AS total
+                 FROM expenses
+                 WHERE paid_by = $1
+                    OR id IN (
+                        SELECT expense_id
+                        FROM expense_participants
+                        WHERE user_id = $1
+                    )`,
+                [req.user.id]
+            )
+        ]);
+
+        const summary = balanceResult.rows.reduce(
+            (accumulator, balance) => {
+                const amount = Number(balance.amount);
+
+                if (balance.debtor_id === req.user.id) {
+                    accumulator.total_to_pay = roundToTwo(accumulator.total_to_pay + amount);
+                }
+
+                if (balance.creditor_id === req.user.id) {
+                    accumulator.total_to_receive = roundToTwo(accumulator.total_to_receive + amount);
+                }
+
+                return accumulator;
+            },
+            {
+                total_to_pay: 0,
+                total_to_receive: 0
+            }
+        );
+
+        return res.json({
+            user_id: req.user.id,
+            groups_count: Number(groupsResult.rows[0].total),
+            expenses_count: Number(expensesResult.rows[0].total),
+            balances_count: balanceResult.rows.length,
+            total_to_pay: summary.total_to_pay,
+            total_to_receive: summary.total_to_receive,
+            net_balance: roundToTwo(summary.total_to_receive - summary.total_to_pay)
+        });
+    } catch (error) {
+        return res.status(500).json({ error: error.message });
+    }
+};
+
 module.exports = {
     createExpense,
-    getMyBalances
+    getMyBalances,
+    getOptimizedPayments,
+    getDashboard
 };
