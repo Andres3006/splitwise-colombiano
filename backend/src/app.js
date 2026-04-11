@@ -1,22 +1,25 @@
 const express = require('express');
-const app = express();
 
+const pool = require('./db/connection');
+const { ensureSplitwiseSchema } = require('./db/splitwise.schema');
 const testRoutes = require('./routes/test.routes');
+const authRoutes = require('./routes/auth.routes');
+const expensesRoutes = require('./routes/expenses.routes');
+const balancesRoutes = require('./routes/balances.routes');
+const verifyToken = require('./middlewares/auth.middleware');
+
+const app = express();
 
 app.use(express.json());
 
-// rutas
 app.use('/api', testRoutes);
+app.use('/api/auth', authRoutes);
+app.use('/api/expenses', expensesRoutes);
+app.use('/api/balances', balancesRoutes);
 
 app.get('/', (req, res) => {
-    res.send('API funcionando 🚀');
+    res.send('API funcionando');
 });
-
-app.listen(3000, () => {
-    console.log('Servidor en puerto 3000');
-});
-
-const pool = require('./db/connection');
 
 app.get('/db-test', async (req, res) => {
     try {
@@ -27,6 +30,23 @@ app.get('/db-test', async (req, res) => {
     }
 });
 
-const authRoutes = require('./routes/auth.routes');
+app.get('/private', verifyToken, (req, res) => {
+    res.json({
+        message: 'Ruta protegida',
+        user: req.user
+    });
+});
 
-app.use('/api/auth', authRoutes);
+const startServer = async () => {
+    try {
+        await ensureSplitwiseSchema();
+        app.listen(3000, () => {
+            console.log('Servidor en puerto 3000');
+        });
+    } catch (error) {
+        console.error('Error iniciando servidor:', error.message);
+        process.exit(1);
+    }
+};
+
+startServer();
