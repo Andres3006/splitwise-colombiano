@@ -1,6 +1,8 @@
 const pool = require('../db/connection');
 
 const roundToTwo = (value) => Number(Number(value).toFixed(2));
+const MIN_LOAN_AMOUNT = 1000;
+const MAX_LOAN_TERM_DAYS = 15;
 
 const ensureGroupMembership = async (client, groupId, userIds) => {
     const membersResult = await client.query(
@@ -37,8 +39,10 @@ const createLoan = async (req, res) => {
             return res.status(400).json({ error: 'El lender_id es obligatorio' });
         }
 
-        if (!Number.isFinite(normalizedAmount) || normalizedAmount <= 0) {
-            return res.status(400).json({ error: 'El monto debe ser mayor a 0' });
+        if (!Number.isFinite(normalizedAmount) || normalizedAmount < MIN_LOAN_AMOUNT) {
+            return res.status(400).json({
+                error: `El monto minimo para solicitar un prestamo es de ${MIN_LOAN_AMOUNT.toLocaleString('es-CO')} pesos`
+            });
         }
 
         if (!dueDate) {
@@ -52,6 +56,20 @@ const createLoan = async (req, res) => {
         const parsedDueDate = new Date(dueDate);
         if (Number.isNaN(parsedDueDate.getTime())) {
             return res.status(400).json({ error: 'La fecha limite no es valida' });
+        }
+
+        const now = new Date();
+        const maxDueDate = new Date(now);
+        maxDueDate.setDate(maxDueDate.getDate() + MAX_LOAN_TERM_DAYS);
+
+        if (parsedDueDate < now) {
+            return res.status(400).json({ error: 'La fecha a pagar no puede ser anterior a la fecha actual' });
+        }
+
+        if (parsedDueDate > maxDueDate) {
+            return res.status(400).json({
+                error: `La fecha a pagar no puede superar los ${MAX_LOAN_TERM_DAYS} dias desde hoy`
+            });
         }
 
         await client.query('BEGIN');
@@ -172,9 +190,9 @@ const getMyLoans = async (req, res) => {
              FROM loans l
              JOIN users lender ON lender.id = l.lender_id
              JOIN users borrower ON borrower.id = l.borrower_id
-             WHERE l.lender_id = $1
-                OR l.borrower_id = $1
-             ${groupFilter}
+             WHERE (l.lender_id = $1
+                OR l.borrower_id = $1)
+               ${groupFilter}
              ORDER BY l.created_at DESC`,
             params
         );
@@ -199,7 +217,7 @@ const respondLoan = async (req, res) => {
         await client.query('BEGIN');
 
         const loanResult = await client.query(
-            `SELECT id, lender_id, borrower_id, group_id, status, due_date
+            `SELECT id, lender_id, borrower_id, group_id, status, due_date, amount
              FROM loans
              WHERE id = $1
              LIMIT 1`,
@@ -221,6 +239,54 @@ const respondLoan = async (req, res) => {
         if (loan.status !== 'pending') {
             await client.query('ROLLBACK');
             return res.status(409).json({ error: 'La solicitud ya no esta pendiente' });
+        }
+
+        if (action === 'accept') {
+            const walletUsersResult = await client.query(
+                `SELECT id, wallet_balance
+                 FROM users
+                 WHERE id = ANY($1::uuid[])
+                 FOR UPDATE`,
+                [[loan.lender_id, loan.borrower_id]]
+            );
+
+            const lender = walletUsersResult.rows.find((user) => user.id === loan.lender_id);
+            const loanAmount = roundToTwo(Number(loan.amount));
+
+            if (Number(lender.wallet_balance) < loanAmount) {
+                await client.query('ROLLBACK');
+                return res.status(400).json({
+                    error: 'No tienes saldo disponible suficiente para prestar ese dinero'
+                });
+            }
+
+            await client.query(
+                `UPDATE users
+                 SET wallet_balance = wallet_balance - $1
+                 WHERE id = $2`,
+                [loanAmount, loan.lender_id]
+            );
+
+            await client.query(
+                `UPDATE users
+                 SET wallet_balance = wallet_balance + $1
+                 WHERE id = $2`,
+                [loanAmount, loan.borrower_id]
+            );
+
+            await client.query(
+                `INSERT INTO wallet_transactions (user_id, transaction_type, amount, reference)
+                 VALUES
+                    ($1, 'loan_disbursement_out', $2, $3),
+                    ($4, 'loan_disbursement_in', $2, $5)`,
+                [
+                    loan.lender_id,
+                    loanAmount,
+                    `Prestamo entregado a ${loan.borrower_id}`,
+                    loan.borrower_id,
+                    `Prestamo recibido de ${loan.lender_id}`
+                ]
+            );
         }
 
         const nextStatus = action === 'accept' ? 'active' : 'rejected';

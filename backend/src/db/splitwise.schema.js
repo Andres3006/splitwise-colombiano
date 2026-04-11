@@ -85,6 +85,15 @@ const ensureSplitwiseSchema = async () => {
             created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
         );
 
+        CREATE TABLE IF NOT EXISTS wallet_transactions (
+            id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+            user_id UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+            transaction_type VARCHAR(30) NOT NULL,
+            amount NUMERIC(12,2) NOT NULL CHECK (amount > 0),
+            reference TEXT,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        );
+
         CREATE INDEX IF NOT EXISTS idx_friend_requests_sender
         ON friend_requests (sender_id);
 
@@ -103,8 +112,14 @@ const ensureSplitwiseSchema = async () => {
         CREATE INDEX IF NOT EXISTS idx_group_messages_sender_id
         ON group_messages (sender_id);
 
+        CREATE INDEX IF NOT EXISTS idx_wallet_transactions_user_id
+        ON wallet_transactions (user_id);
+
         ALTER TABLE groups
         ADD COLUMN IF NOT EXISTS max_members INT NOT NULL DEFAULT 10;
+
+        ALTER TABLE users
+        ADD COLUMN IF NOT EXISTS wallet_balance NUMERIC(12,2) NOT NULL DEFAULT 0;
 
         ALTER TABLE groups
         DROP CONSTRAINT IF EXISTS groups_max_members_check;

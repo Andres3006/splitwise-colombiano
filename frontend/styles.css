@@ -238,6 +238,11 @@ textarea:focus {
     color: var(--muted);
 }
 
+.field-hint {
+    color: var(--muted);
+    font-size: 0.95rem;
+}
+
 .dashboard-shell {
     min-height: 100vh;
     display: grid;
@@ -304,6 +309,45 @@ textarea:focus {
     margin-top: auto;
     display: grid;
     gap: 0.8rem;
+}
+
+.sidebar-mini-panel {
+    padding: 1rem;
+    border-radius: 22px;
+    background: linear-gradient(180deg, rgba(11, 20, 42, 0.92), rgba(5, 11, 25, 0.92));
+    border: 1px solid rgba(118, 166, 255, 0.14);
+}
+
+.mini-panel-header h3 {
+    margin: 0 0 0.9rem;
+    font-size: 1rem;
+    color: #dce7ff;
+}
+
+.mini-groups-list {
+    display: grid;
+    gap: 0.6rem;
+}
+
+.mini-group-item {
+    width: 100%;
+    text-align: left;
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    gap: 0.8rem;
+    background: rgba(255, 255, 255, 0.04);
+    border: 1px solid rgba(118, 166, 255, 0.12);
+    box-shadow: none;
+    padding: 0.85rem 0.95rem;
+}
+
+.mini-group-item span {
+    font-weight: 600;
+}
+
+.mini-group-item small {
+    color: var(--muted);
 }
 
 .dashboard-main {
@@ -548,6 +592,18 @@ textarea:focus {
     margin-top: 0.6rem;
 }
 
+.money-input-shell {
+    display: grid;
+    grid-template-columns: 92px 1fr 92px;
+    gap: 0.7rem;
+    align-items: center;
+}
+
+.amount-stepper {
+    padding: 0.92rem 0.8rem;
+    text-align: center;
+}
+
 .chat-list {
     display: grid;
     gap: 0.7rem;
@@ -665,6 +721,10 @@ small {
 
     .custom-share-row,
     .inline-search {
+        grid-template-columns: 1fr;
+    }
+
+    .money-input-shell {
         grid-template-columns: 1fr;
     }
 

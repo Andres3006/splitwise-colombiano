@@ -329,6 +329,89 @@ const settleBalance = async (client, { groupId, debtorId, creditorId, amount }) 
     return { remaining_amount: remaining, cleared: false };
 };
 
+const settleLoan = async (client, { loanId = null, groupId, borrowerId, lenderId, amount }) => {
+    if (borrowerId === lenderId || amount <= 0) {
+        return null;
+    }
+
+    const params = [borrowerId, lenderId];
+    let query = `
+        SELECT id, group_id, borrower_id, lender_id, total_amount, status, created_at
+        FROM loans
+        WHERE status = 'active'
+          AND borrower_id = $1
+          AND lender_id = $2
+    `;
+
+    if (groupId) {
+        params.push(groupId);
+        query += ` AND group_id = $${params.length}`;
+    } else {
+        query += ' AND group_id IS NULL';
+    }
+
+    if (loanId) {
+        params.push(loanId);
+        query += ` AND id = $${params.length}`;
+    }
+
+    query += ' ORDER BY created_at ASC LIMIT 1 FOR UPDATE';
+
+    const loanResult = await client.query(query, params);
+
+    if (loanResult.rows.length === 0) {
+        const error = new Error('No existe un prestamo activo pendiente para este pago');
+        error.statusCode = 400;
+        throw error;
+    }
+
+    const loan = loanResult.rows[0];
+    const paidResult = await client.query(
+        `SELECT COALESCE(SUM(amount), 0) AS total_paid
+         FROM payments
+         WHERE loan_id = $1`,
+        [loan.id]
+    );
+
+    const totalPaid = Number(paidResult.rows[0].total_paid);
+    const remaining = roundToTwo(Number(loan.total_amount) - totalPaid);
+
+    if (remaining <= 0) {
+        await client.query(
+            `UPDATE loans
+             SET status = 'paid'
+             WHERE id = $1`,
+            [loan.id]
+        );
+        const error = new Error('Este prestamo ya fue pagado por completo');
+        error.statusCode = 409;
+        throw error;
+    }
+
+    if (amount > remaining) {
+        const error = new Error('El pago no puede ser mayor al saldo pendiente del prestamo');
+        error.statusCode = 400;
+        throw error;
+    }
+
+    const nextRemaining = roundToTwo(remaining - amount);
+
+    if (nextRemaining === 0) {
+        await client.query(
+            `UPDATE loans
+             SET status = 'paid'
+             WHERE id = $1`,
+            [loan.id]
+        );
+    }
+
+    return {
+        loan_id: loan.id,
+        remaining_amount: nextRemaining,
+        cleared: nextRemaining === 0
+    };
+};
+
 const createExpense = async (req, res) => {
     const client = await pool.connect();
 
@@ -532,7 +615,7 @@ const getOptimizedPayments = async (req, res) => {
 
 const getDashboard = async (req, res) => {
     try {
-        const [balanceResult, groupsResult, expensesResult] = await Promise.all([
+        const [balanceResult, groupsResult, expensesResult, walletResult, loansResult] = await Promise.all([
             getBalancesByUser(req.user.id),
             pool.query(
                 `SELECT COUNT(*) AS total
@@ -550,6 +633,27 @@ const getDashboard = async (req, res) => {
                         FROM expense_participants
                         WHERE user_id = $1
                     )`,
+                [req.user.id]
+            ),
+            pool.query(
+                `SELECT wallet_balance
+                 FROM users
+                 WHERE id = $1
+                 LIMIT 1`,
+                [req.user.id]
+            ),
+            pool.query(
+                `SELECT
+                    l.id,
+                    l.borrower_id,
+                    l.lender_id,
+                    l.total_amount,
+                    COALESCE(SUM(p.amount), 0) AS total_paid
+                 FROM loans l
+                 LEFT JOIN payments p ON p.loan_id = l.id
+                 WHERE l.status = 'active'
+                   AND (l.borrower_id = $1 OR l.lender_id = $1)
+                 GROUP BY l.id, l.borrower_id, l.lender_id, l.total_amount`,
                 [req.user.id]
             )
         ]);
@@ -574,14 +678,41 @@ const getDashboard = async (req, res) => {
             }
         );
 
+        const loanSummary = loansResult.rows.reduce(
+            (accumulator, loan) => {
+                const remaining = roundToTwo(Number(loan.total_amount) - Number(loan.total_paid));
+
+                if (remaining <= 0) {
+                    return accumulator;
+                }
+
+                if (loan.borrower_id === req.user.id) {
+                    accumulator.total_to_pay = roundToTwo(accumulator.total_to_pay + remaining);
+                }
+
+                if (loan.lender_id === req.user.id) {
+                    accumulator.total_to_receive = roundToTwo(accumulator.total_to_receive + remaining);
+                }
+
+                return accumulator;
+            },
+            {
+                total_to_pay: 0,
+                total_to_receive: 0
+            }
+        );
+
+        const totalToPay = roundToTwo(summary.total_to_pay + loanSummary.total_to_pay);
+        const totalToReceive = roundToTwo(summary.total_to_receive + loanSummary.total_to_receive);
+
         return res.json({
             user_id: req.user.id,
             groups_count: Number(groupsResult.rows[0].total),
             expenses_count: Number(expensesResult.rows[0].total),
             balances_count: balanceResult.rows.length,
-            total_to_pay: summary.total_to_pay,
-            total_to_receive: summary.total_to_receive,
-            net_balance: roundToTwo(summary.total_to_receive - summary.total_to_pay)
+            total_to_pay: totalToPay,
+            total_to_receive: totalToReceive,
+            available_balance: Number(walletResult.rows[0]?.wallet_balance || 0)
         });
     } catch (error) {
         return res.status(500).json({ error: error.message });
@@ -660,9 +791,10 @@ const registerPayment = async (req, res) => {
         await client.query('BEGIN');
 
         const usersResult = await client.query(
-            `SELECT id
+            `SELECT id, wallet_balance
              FROM users
-             WHERE id = ANY($1::uuid[])`,
+             WHERE id = ANY($1::uuid[])
+             FOR UPDATE`,
             [[req.user.id, toUser]]
         );
 
@@ -681,18 +813,71 @@ const registerPayment = async (req, res) => {
             }
         }
 
-        const settlement = await settleBalance(client, {
-            groupId,
-            debtorId: req.user.id,
-            creditorId: toUser,
-            amount: paymentAmount
-        });
+        const sender = usersResult.rows.find((user) => user.id === req.user.id);
+
+        if (Number(sender.wallet_balance) < paymentAmount) {
+            await client.query('ROLLBACK');
+            return res.status(400).json({ error: 'No tienes saldo disponible suficiente para realizar este pago' });
+        }
+
+        let settlement;
+        let resolvedLoanId = loanId;
+
+        try {
+            settlement = await settleBalance(client, {
+                groupId,
+                debtorId: req.user.id,
+                creditorId: toUser,
+                amount: paymentAmount
+            });
+        } catch (error) {
+            if (error.statusCode !== 400) {
+                throw error;
+            }
+
+            settlement = await settleLoan(client, {
+                loanId,
+                groupId,
+                borrowerId: req.user.id,
+                lenderId: toUser,
+                amount: paymentAmount
+            });
+            resolvedLoanId = settlement.loan_id;
+        }
+
+        await client.query(
+            `UPDATE users
+             SET wallet_balance = wallet_balance - $1
+             WHERE id = $2`,
+            [paymentAmount, req.user.id]
+        );
+
+        await client.query(
+            `UPDATE users
+             SET wallet_balance = wallet_balance + $1
+             WHERE id = $2`,
+            [paymentAmount, toUser]
+        );
 
         const paymentResult = await client.query(
             `INSERT INTO payments (loan_id, from_user, to_user, amount)
              VALUES ($1, $2, $3, $4)
              RETURNING id, loan_id, from_user, to_user, amount, created_at`,
-            [loanId, req.user.id, toUser, paymentAmount]
+            [resolvedLoanId, req.user.id, toUser, paymentAmount]
+        );
+
+        await client.query(
+            `INSERT INTO wallet_transactions (user_id, transaction_type, amount, reference)
+             VALUES
+                ($1, 'payment_out', $2, $3),
+                ($4, 'payment_in', $2, $5)`,
+            [
+                req.user.id,
+                paymentAmount,
+                `Pago enviado a ${toUser}`,
+                toUser,
+                `Pago recibido de ${req.user.id}`
+            ]
         );
 
         await client.query('COMMIT');

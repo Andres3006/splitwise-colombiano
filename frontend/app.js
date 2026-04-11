@@ -33,31 +33,32 @@ const els = {
     viewTitle: $('view-title'),
     loginForm: $('login-form'),
     logoutBtn: $('logout-btn'),
-    refreshAllBtn: $('refresh-all-btn'),
-    checkServerBtn: $('check-server-btn'),
     navLinks: [...document.querySelectorAll('.nav-link')],
     shortcuts: [...document.querySelectorAll('.nav-shortcut')],
     userSearchForm: $('user-search-form'),
     userSearch: $('user-search'),
     groupForm: $('group-form'),
-    groupName: $('group-name'),
-    groupMaxMembers: $('group-max-members'),
-    groupPrivate: $('group-private'),
-    showCreateGroupBtn: $('show-create-group-btn'),
-    hideCreateGroupBtn: $('hide-create-group-btn'),
-    createGroupCard: $('create-group-card'),
     groupDetailCard: $('group-detail-card'),
     groupDetailContent: $('group-detail-content'),
     hideGroupDetailBtn: $('hide-group-detail-btn'),
     toggleGroupMembersBtn: $('toggle-group-members-btn'),
     expenseForm: $('expense-form'),
+    depositForm: $('deposit-form'),
     paymentForm: $('payment-form'),
     groupLoanForm: $('group-loan-form'),
     groupLoanFormCard: $('group-loan-form-card'),
+    showGroupLoanFormBtn: $('show-group-loan-form-btn'),
     groupLoanTargetName: $('group-loan-target-name'),
     groupLoanTargetId: $('group-loan-target-id'),
+    groupLoanAmount: $('group-loan-amount'),
+    groupLoanDueDate: $('group-loan-due-date'),
+    groupLoanMembers: $('group-loan-members'),
     hideGroupLoanFormBtn: $('hide-group-loan-form-btn'),
+    increaseGroupLoanAmountBtn: $('increase-group-loan-amount'),
+    decreaseGroupLoanAmountBtn: $('decrease-group-loan-amount'),
     groupMessageForm: $('group-message-form'),
+    sidebarGroupsList: $('sidebar-groups-list'),
+    publicGroupsCard: $('public-groups-card'),
     publicGroupsList: $('public-groups-list'),
     groupsList: $('groups-list'),
     usersList: $('users-list'),
@@ -87,20 +88,56 @@ const viewTitles = {
     inicio: 'Inicio',
     grupos: 'Grupos',
     usuarios: 'Usuarios',
-    amigos: 'Amigos',
-    solicitudes: 'Solicitudes',
-    gastos: 'Gastos',
-    pagos: 'Pagos'
+    amigos: 'Amigos'
 };
 
 const roleLabels = { owner: 'Propietario', admin: 'Administrador', member: 'Miembro' };
 const splitTypeLabels = { equal: 'Division equitativa', custom: 'Division personalizada' };
 const invitationStatusLabels = { pending: 'Pendiente', accepted: 'Aceptada', rejected: 'Rechazada' };
+const MIN_GROUP_LOAN_AMOUNT = 1000;
+const GROUP_LOAN_STEP = 50;
+const MAX_GROUP_LOAN_TERM_DAYS = 15;
 
 function setMessage(value, visible = true) {
-    const content = typeof value === 'string' ? value : JSON.stringify(value, null, 2);
+    const content = typeof value === 'string'
+        ? value
+        : value?.message
+            ? value.message
+            : value?.error
+                ? value.error
+                : 'Operacion completada correctamente.';
+    const normalizedContent = String(content || '').toLowerCase();
+    const looksLikeError = [
+        'error',
+        'incorrect',
+        'obligatorio',
+        'obligatoria',
+        'inval',
+        'no ',
+        'debes',
+        'fall',
+        'null',
+        'cannot',
+        'ya ',
+        'banead',
+        '403',
+        '404',
+        '409',
+        '500'
+    ].some((fragment) => normalizedContent.includes(fragment));
+
+    if (!els.messageBox) return;
+
     els.messageBox.textContent = content;
-    els.messageBox.classList.toggle('hidden', !visible || !content);
+    els.messageBox.classList.toggle('hidden', !visible || !content || !looksLikeError);
+}
+
+function setErrorMessage(value) {
+    setMessage(value, true);
+}
+
+function clearMessage() {
+    setMessage('', false);
 }
 
 function setCurrentDate() {
@@ -145,18 +182,26 @@ async function api(path, options = {}) {
 
 const selectedValues = (container) => [...container.querySelectorAll('input:checked')].map((input) => input.value);
 const formatDate = (value) => (value ? dateFormatter.format(new Date(value)) : 'Sin fecha');
+const formatMoneyInput = (value) => Number(value || 0).toLocaleString('es-CO');
+const parseMoneyInput = (value) => Number(String(value || '').replace(/\./g, '').replace(/[^\d]/g, '')) || 0;
 const renderList = (target, items, renderer, emptyText) => {
+    if (!target) return;
     target.innerHTML = items.length ? items.map(renderer).join('') : `<p class="empty-state">${emptyText}</p>`;
 };
 
 function renderMetrics() {
     $('metric-pay').textContent = money.format(Number(state.dashboard.total_to_pay || 0));
     $('metric-receive').textContent = money.format(Number(state.dashboard.total_to_receive || 0));
-    $('metric-net').textContent = money.format(Number(state.dashboard.net_balance || 0));
+    $('metric-wallet').textContent = money.format(Number(state.dashboard.available_balance || 0));
     $('metric-groups').textContent = Number(state.dashboard.groups_count || state.groups.length || 0);
+    const availableBalanceHint = $('available-balance-hint');
+    if (availableBalanceHint) {
+        availableBalanceHint.textContent = money.format(Number(state.dashboard.available_balance || 0));
+    }
 }
 
 function updateGroupSelectors() {
+    if (!els.expenseGroup || !els.paymentGroup) return;
     const options = ['<option value="">Sin grupo</option>']
         .concat(state.groups.map((group) => `<option value="${group.id}">${group.name}</option>`))
         .join('');
@@ -165,6 +210,7 @@ function updateGroupSelectors() {
 }
 
 function updateCustomSplitInputs() {
+    if (!els.customSplitContainer || !els.expenseParticipantsOptions) return;
     const selected = selectedValues(els.expenseParticipantsOptions);
     els.customSplitContainer.innerHTML = selected.map((id) => {
         const user = state.users.find((item) => item.id === id);
@@ -173,6 +219,7 @@ function updateCustomSplitInputs() {
 }
 
 function renderSelectors() {
+    if (!els.expenseParticipantsOptions || !els.expensePaidBy || !els.paymentToUser) return;
     const myId = state.user?.id;
     const otherUsers = state.users.filter((user) => user.id !== myId);
 
@@ -193,12 +240,11 @@ function renderSelectors() {
 }
 
 function renderGroups() {
+    if (!els.groupsList) return;
     renderList(els.groupsList, state.groups, (group) => `
         <div class="row-card">
             <div>
                 <strong>${group.name}</strong>
-                <p>${group.is_private ? 'Privado' : 'Publico'} · ${roleLabels[group.role] || group.role}</p>
-                <p>${group.total_members}/${group.max_members} personas</p>
             </div>
             <div class="card-actions">
                 <button type="button" data-action="open-group-detail" data-group-id="${group.id}">Entrar</button>
@@ -207,9 +253,29 @@ function renderGroups() {
     `, 'Aun no perteneces a ningun grupo.');
 }
 
+function renderSidebarGroups() {
+    const groupsToShow = state.selectedGroup?.group
+        ? state.groups.filter((group) => group.id === state.selectedGroup.group.id)
+        : state.groups.slice(0, 5);
+
+    renderList(els.sidebarGroupsList, groupsToShow, (group) => `
+        <button
+            type="button"
+            class="mini-group-item"
+            data-action="open-group-detail"
+            data-group-id="${group.id}"
+        >
+            <span>${group.name}</span>
+            <small>${group.total_members}/${group.max_members}</small>
+        </button>
+    `, 'Aun no tienes grupos.');
+}
+
 function renderGroupDetail() {
+    if (!els.groupDetailCard || !els.groupDetailContent) return;
     if (!state.selectedGroup) {
         els.groupDetailCard.classList.add('hidden');
+        els.publicGroupsCard?.classList.remove('hidden');
         els.groupDetailContent.innerHTML = '';
         if (els.toggleGroupMembersBtn) {
             els.toggleGroupMembersBtn.textContent = 'Ver miembros';
@@ -219,6 +285,7 @@ function renderGroupDetail() {
 
     const { group, members } = state.selectedGroup;
     els.groupDetailCard.classList.remove('hidden');
+    els.publicGroupsCard?.classList.add('hidden');
     if (els.toggleGroupMembersBtn) {
         els.toggleGroupMembersBtn.textContent = state.showGroupMembers ? 'Ocultar miembros' : 'Ver miembros';
     }
@@ -248,7 +315,6 @@ function renderGroupDetail() {
                     <strong>${member.name}</strong>
                     <p>${member.email}</p>
                     <p>${roleLabels[member.role] || member.role}</p>
-                    ${member.user_id !== state.user?.id ? `<div class="card-actions"><button type="button" data-action="open-group-loan-form" data-user-id="${member.user_id}" data-user-name="${member.name}">Solicitar prestamo</button></div>` : ''}
                 </div>
             `).join('')}
         </div>
@@ -424,6 +490,7 @@ function renderLoans() {
 }
 
 function renderGroupLoans() {
+    if (!els.groupLoansList) return;
     const selectedGroupId = state.selectedGroup?.group?.id;
     const loans = state.loans.filter((loan) => loan.group_id === selectedGroupId);
 
@@ -449,7 +516,20 @@ function renderGroupLoans() {
     `, 'Aun no hay prestamos en este grupo.');
 }
 
+function syncGroupLoanMembers() {
+    if (!els.groupLoanMembers) return;
+    const members = state.selectedGroup?.members || [];
+    const availableMembers = members.filter((member) => member.user_id !== state.user?.id);
+
+    if (els.groupLoanMembers) {
+        els.groupLoanMembers.innerHTML = availableMembers
+            .map((member) => `<option value="${member.name} - ${member.email}"></option>`)
+            .join('');
+    }
+}
+
 function renderGroupMessages() {
+    if (!els.groupMessagesList) return;
     renderList(els.groupMessagesList, state.groupMessages, (message) => `
         <div class="chat-message ${message.sender_id === state.user?.id ? 'chat-message-own' : ''}">
             <strong>${message.sender_name}</strong>
@@ -463,6 +543,7 @@ function renderAll() {
     renderMetrics();
     renderSelectors();
     renderGroups();
+    renderSidebarGroups();
     renderGroupDetail();
     renderPublicGroups();
     renderBalances();
@@ -477,6 +558,7 @@ function renderAll() {
     renderLoans();
     renderGroupLoans();
     renderGroupMessages();
+    syncGroupLoanMembers();
 }
 
 async function fetchSession() {
@@ -567,10 +649,11 @@ function hideCreateGroupCard() {
     els.groupMaxMembers.value = 10;
 }
 
-function openGroupLoanForm(userId, userName) {
+function openGroupLoanForm(userId = '', userName = '') {
     els.groupLoanFormCard.classList.remove('hidden');
     els.groupLoanTargetId.value = userId;
     els.groupLoanTargetName.value = userName;
+    configureGroupLoanDueDate();
     els.groupLoanFormCard.scrollIntoView({ behavior: 'smooth', block: 'start' });
 }
 
@@ -579,6 +662,42 @@ function hideGroupLoanForm() {
     els.groupLoanForm.reset();
     els.groupLoanTargetId.value = '';
     els.groupLoanTargetName.value = '';
+    if (els.groupLoanAmount) {
+        els.groupLoanAmount.value = '';
+    }
+    configureGroupLoanDueDate();
+}
+
+function setGroupLoanAmountValue(value) {
+    if (!els.groupLoanAmount) return;
+    const normalized = Math.max(MIN_GROUP_LOAN_AMOUNT, Math.round(Number(value || 0)));
+    els.groupLoanAmount.value = formatMoneyInput(normalized);
+}
+
+function adjustGroupLoanAmount(delta) {
+    const current = parseMoneyInput(els.groupLoanAmount?.value || 0);
+    const next = Math.max(MIN_GROUP_LOAN_AMOUNT, current + delta);
+    setGroupLoanAmountValue(next);
+}
+
+function formatDateTimeLocal(date) {
+    const year = date.getFullYear();
+    const month = String(date.getMonth() + 1).padStart(2, '0');
+    const day = String(date.getDate()).padStart(2, '0');
+    const hours = String(date.getHours()).padStart(2, '0');
+    const minutes = String(date.getMinutes()).padStart(2, '0');
+    return `${year}-${month}-${day}T${hours}:${minutes}`;
+}
+
+function configureGroupLoanDueDate() {
+    if (!els.groupLoanDueDate) return;
+
+    const now = new Date();
+    const maxDate = new Date(now);
+    maxDate.setDate(maxDate.getDate() + MAX_GROUP_LOAN_TERM_DAYS);
+
+    els.groupLoanDueDate.min = formatDateTimeLocal(now);
+    els.groupLoanDueDate.max = formatDateTimeLocal(maxDate);
 }
 
 async function handleLogin(event) {
@@ -681,23 +800,60 @@ async function handleCreatePayment(event) {
     }
 }
 
+async function handleDeposit(event) {
+    event.preventDefault();
+    try {
+        await api('/api/users/me/wallet/deposit', {
+            method: 'POST',
+            body: JSON.stringify({
+                amount: Number($('deposit-amount').value)
+            })
+        });
+        els.depositForm.reset();
+        await loadDashboard();
+        renderMetrics();
+        setMessage('Saldo consignado correctamente.');
+    } catch (error) {
+        setMessage(error.message);
+    }
+}
+
 async function handleCreateLoan(event) {
     event.preventDefault();
     try {
+        const typedName = els.groupLoanTargetName.value.trim().toLowerCase();
+        const normalizedAmount = parseMoneyInput(els.groupLoanAmount.value);
+        const availableMembers = (state.selectedGroup?.members || []).filter((member) => member.user_id !== state.user?.id);
+        const exactLabelMatch = availableMembers.find((member) => (
+            `${member.name} - ${member.email}`.trim().toLowerCase() === typedName
+        ));
+        const exactNameMatch = availableMembers.find((member) => (
+            member.name.trim().toLowerCase() === typedName
+        ));
+        const startsWithNameMatch = availableMembers.find((member) => (
+            member.name.trim().toLowerCase().startsWith(typedName)
+        ));
+        const targetMember = exactLabelMatch || exactNameMatch || startsWithNameMatch;
+
+        if (!targetMember) {
+            throw new Error('Debes elegir una persona valida del grupo');
+        }
+
+        els.groupLoanTargetName.value = targetMember.name;
+        els.groupLoanTargetId.value = targetMember.user_id;
+
         await api('/api/loans', {
             method: 'POST',
             body: JSON.stringify({
                 group_id: state.selectedGroup?.group?.id,
                 lender_id: els.groupLoanTargetId.value,
-                amount: Number($('group-loan-amount').value),
+                amount: normalizedAmount,
                 due_date: $('group-loan-due-date').value,
                 description: $('group-loan-description').value
             })
         });
         hideGroupLoanForm();
-        await loadLoans();
-        renderLoans();
-        renderGroupLoans();
+        await loadAll();
         setMessage('Solicitud de prestamo registrada correctamente.');
     } catch (error) {
         setMessage(error.message);
@@ -718,6 +874,8 @@ async function handleOpenGroupDetail(groupId) {
     await loadGroupDetails(groupId);
     await loadGroupMessages(groupId);
     state.showGroupMembers = false;
+    setActiveView('grupos');
+    renderSidebarGroups();
     renderGroupDetail();
     renderGroupLoans();
     renderGroupMessages();
@@ -731,6 +889,7 @@ async function handleLeaveGroup(groupId) {
     state.showGroupMembers = false;
     await Promise.all([loadGroups(), loadPublicGroups(), loadDashboard()]);
     renderGroups();
+    renderSidebarGroups();
     renderGroupDetail();
     renderPublicGroups();
     renderMetrics();
@@ -781,17 +940,13 @@ async function handleRespondLoan(loanId, action) {
         method: 'PATCH',
         body: JSON.stringify({ action })
     });
-    await loadLoans();
-    renderLoans();
-    renderGroupLoans();
+    await loadAll();
     setMessage(action === 'accept' ? 'Prestamo aceptado.' : 'Prestamo rechazado.');
 }
 
 async function handleCancelLoan(loanId) {
     await api(`/api/loans/${loanId}/cancel`, { method: 'DELETE' });
-    await loadLoans();
-    renderLoans();
-    renderGroupLoans();
+    await loadAll();
     setMessage('Solicitud de prestamo cancelada.');
 }
 
@@ -816,12 +971,13 @@ async function handleSendGroupMessage(event) {
     }
 }
 
-function bindEvents() {
-    els.loginForm?.addEventListener('submit', handleLogin);
-    els.groupForm?.addEventListener('submit', handleCreateGroup);
-    els.expenseForm?.addEventListener('submit', handleCreateExpense);
-    els.paymentForm?.addEventListener('submit', handleCreatePayment);
-    els.groupLoanForm?.addEventListener('submit', handleCreateLoan);
+    function bindEvents() {
+        els.loginForm?.addEventListener('submit', handleLogin);
+        els.groupForm?.addEventListener('submit', handleCreateGroup);
+        els.expenseForm?.addEventListener('submit', handleCreateExpense);
+        els.depositForm?.addEventListener('submit', handleDeposit);
+        els.paymentForm?.addEventListener('submit', handleCreatePayment);
+        els.groupLoanForm?.addEventListener('submit', handleCreateLoan);
     els.groupMessageForm?.addEventListener('submit', handleSendGroupMessage);
 
     els.logoutBtn?.addEventListener('click', () => {
@@ -834,31 +990,15 @@ function bindEvents() {
         setMessage('Sesion cerrada.');
     });
 
-    els.refreshAllBtn?.addEventListener('click', async () => {
-        try {
-            await loadAll(els.userSearch.value || '');
-            setMessage('Datos actualizados.');
-        } catch (error) {
-            setMessage(error.message);
-        }
-    });
-
-    els.checkServerBtn?.addEventListener('click', async () => {
-        try {
-            const data = await api('/db-test');
-            setMessage(typeof data === 'string' ? data : JSON.stringify(data, null, 2));
-        } catch (error) {
-            setMessage(error.message);
-        }
-    });
-
     els.navLinks.forEach((button) => button.addEventListener('click', () => setActiveView(button.dataset.view)));
     els.shortcuts.forEach((button) => button.addEventListener('click', () => setActiveView(button.dataset.targetView)));
     els.showCreateGroupBtn?.addEventListener('click', showCreateGroupCard);
     els.hideCreateGroupBtn?.addEventListener('click', hideCreateGroupCard);
+    els.showGroupLoanFormBtn?.addEventListener('click', () => openGroupLoanForm());
     els.hideGroupDetailBtn?.addEventListener('click', () => {
         state.selectedGroup = null;
         state.showGroupMembers = false;
+        renderSidebarGroups();
         renderGroupDetail();
     });
     els.toggleGroupMembersBtn?.addEventListener('click', () => {
@@ -866,6 +1006,28 @@ function bindEvents() {
         renderGroupDetail();
     });
     els.hideGroupLoanFormBtn?.addEventListener('click', hideGroupLoanForm);
+    els.increaseGroupLoanAmountBtn?.addEventListener('click', () => adjustGroupLoanAmount(GROUP_LOAN_STEP));
+    els.decreaseGroupLoanAmountBtn?.addEventListener('click', () => adjustGroupLoanAmount(-GROUP_LOAN_STEP));
+    els.groupLoanAmount?.addEventListener('input', (event) => {
+        const parsed = parseMoneyInput(event.target.value);
+        event.target.value = parsed ? formatMoneyInput(parsed) : '';
+    });
+    els.groupLoanAmount?.addEventListener('blur', () => {
+        const parsed = parseMoneyInput(els.groupLoanAmount.value);
+        if (!parsed) return;
+        setGroupLoanAmountValue(parsed);
+    });
+    els.groupLoanAmount?.addEventListener('keydown', (event) => {
+        if (event.key === 'ArrowUp') {
+            event.preventDefault();
+            adjustGroupLoanAmount(GROUP_LOAN_STEP);
+        }
+
+        if (event.key === 'ArrowDown') {
+            event.preventDefault();
+            adjustGroupLoanAmount(-GROUP_LOAN_STEP);
+        }
+    });
 
     els.userSearchForm?.addEventListener('submit', async (event) => {
         event.preventDefault();
@@ -942,6 +1104,7 @@ async function bootstrap() {
     setSessionStatus();
     setViewMode(false);
     setActiveView('inicio');
+    configureGroupLoanDueDate();
     bindEvents();
 
     if (!state.token) return;

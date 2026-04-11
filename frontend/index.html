@@ -39,16 +39,19 @@
 
             <nav class="sidebar-nav">
                 <button class="nav-link active" data-view="inicio" type="button">Inicio</button>
+                <button class="nav-link" data-view="amigos" type="button">Amigos</button>
                 <button class="nav-link" data-view="grupos" type="button">Grupos</button>
                 <button class="nav-link" data-view="usuarios" type="button">Usuarios</button>
-                <button class="nav-link" data-view="amigos" type="button">Amigos</button>
-                <button class="nav-link" data-view="solicitudes" type="button">Solicitudes</button>
-                <button class="nav-link" data-view="gastos" type="button">Gastos</button>
-                <button class="nav-link" data-view="pagos" type="button">Pagos</button>
             </nav>
 
+            <section class="sidebar-mini-panel">
+                <div class="mini-panel-header">
+                    <h3>Mis grupos</h3>
+                </div>
+                <div id="sidebar-groups-list" class="mini-groups-list"></div>
+            </section>
+
             <div class="sidebar-footer">
-                <button id="refresh-all-btn" type="button">Actualizar datos</button>
                 <button id="logout-btn" class="ghost" type="button">Cerrar sesion</button>
             </div>
         </aside>
@@ -61,7 +64,6 @@
                 </div>
                 <div class="topbar-actions">
                     <span id="current-date" class="topbar-chip"></span>
-                    <button id="check-server-btn" class="ghost" type="button">Comprobar servidor</button>
                 </div>
             </header>
 
@@ -87,8 +89,8 @@
                         <strong id="metric-receive">$0</strong>
                     </article>
                     <article class="stat-card">
-                        <span>Balance neto</span>
-                        <strong id="metric-net">$0</strong>
+                        <span>Saldo disponible</span>
+                        <strong id="metric-wallet">$0</strong>
                     </article>
                     <article class="stat-card">
                         <span>Mis grupos</span>
@@ -99,18 +101,12 @@
                 <div class="content-grid">
                     <article class="panel-card">
                         <div class="panel-card-header">
-                            <h3>Balances pendientes</h3>
-                            <button id="reload-balances-btn" class="ghost" type="button">Recargar</button>
+                            <h3>Consignar saldo</h3>
                         </div>
-                        <div id="balances-list" class="stack-list"></div>
-                    </article>
-
-                    <article class="panel-card">
-                        <div class="panel-card-header">
-                            <h3>Pagos sugeridos</h3>
-                            <button id="reload-optimize-btn" class="ghost" type="button">Calcular</button>
-                        </div>
-                        <div id="optimize-list" class="stack-list"></div>
+                        <form id="deposit-form" class="stack">
+                            <input type="number" id="deposit-amount" placeholder="Monto a consignar" min="1000" step="1000" required>
+                            <button type="submit">Consignar a mi cuenta</button>
+                        </form>
                     </article>
                 </div>
 
@@ -131,83 +127,18 @@
                         <div id="loans-summary-list" class="stack-list"></div>
                     </article>
                 </div>
+
+                <article class="panel-card">
+                    <div class="panel-card-header">
+                        <h3>Historial de pagos</h3>
+                        <button id="reload-payments-btn" class="ghost" type="button">Recargar</button>
+                    </div>
+                    <div id="payments-list" class="table-list"></div>
+                </article>
             </section>
 
             <section id="view-grupos" class="dashboard-view">
-                <article class="panel-card">
-                    <div class="panel-card-header">
-                        <h3>Mis grupos</h3>
-                        <div class="card-actions">
-                            <button id="reload-groups-btn" class="ghost" type="button">Recargar</button>
-                            <button id="show-create-group-btn" type="button">Crear grupo</button>
-                        </div>
-                    </div>
-                    <div id="groups-list" class="table-list"></div>
-                </article>
-
-                <article id="group-detail-card" class="panel-card hidden">
-                    <div class="panel-card-header">
-                        <h3>Detalle del grupo</h3>
-                        <div class="card-actions">
-                            <button id="toggle-group-members-btn" class="ghost" type="button">Ver miembros</button>
-                            <button id="hide-group-detail-btn" class="ghost" type="button">Cerrar</button>
-                        </div>
-                    </div>
-                    <div id="group-detail-content" class="stack-list"></div>
-                    <div class="content-grid group-detail-grid">
-                        <div class="panel-section">
-                            <div class="panel-card-header">
-                                <h3>Prestamos del grupo</h3>
-                                <button id="reload-group-loans-btn" class="ghost" type="button">Recargar</button>
-                            </div>
-                            <div id="group-loans-list" class="stack-list"></div>
-                        </div>
-                        <div class="panel-section">
-                            <div class="panel-card-header">
-                                <h3>Chat del grupo</h3>
-                                <button id="reload-group-messages-btn" class="ghost" type="button">Recargar</button>
-                            </div>
-                            <div id="group-messages-list" class="chat-list"></div>
-                            <form id="group-message-form" class="stack compact-form">
-                                <textarea id="group-message-text" class="text-area chat-area" placeholder="Escribe un mensaje para el grupo"></textarea>
-                                <button type="submit">Enviar mensaje</button>
-                            </form>
-                        </div>
-                    </div>
-                </article>
-
-                <article id="group-loan-form-card" class="panel-card hidden">
-                    <div class="panel-card-header">
-                        <h3>Solicitar prestamo dentro del grupo</h3>
-                        <button id="hide-group-loan-form-btn" class="ghost" type="button">Cancelar</button>
-                    </div>
-                    <form id="group-loan-form" class="stack">
-                        <input type="text" id="group-loan-target-name" placeholder="Persona seleccionada" readonly>
-                        <input type="hidden" id="group-loan-target-id">
-                        <input type="number" id="group-loan-amount" min="0" step="0.01" placeholder="Monto solicitado" required>
-                        <input type="datetime-local" id="group-loan-due-date" required>
-                        <textarea id="group-loan-description" class="text-area" placeholder="Motivo del prestamo"></textarea>
-                        <button type="submit">Enviar solicitud de prestamo</button>
-                    </form>
-                </article>
-
-                <article id="create-group-card" class="panel-card hidden">
-                    <div class="panel-card-header">
-                        <h3>Crear grupo</h3>
-                        <button id="hide-create-group-btn" class="ghost" type="button">Cancelar</button>
-                    </div>
-                    <form id="group-form" class="stack">
-                        <input type="text" id="group-name" placeholder="Nombre del grupo" required>
-                        <input type="number" id="group-max-members" min="2" max="50" value="10" placeholder="Cantidad maxima de personas" required>
-                        <label class="checkbox-line">
-                            <input type="checkbox" id="group-private">
-                            <span>Grupo privado</span>
-                        </label>
-                        <button type="submit">Guardar grupo</button>
-                    </form>
-                </article>
-
-                <article class="panel-card">
+                <article id="public-groups-card" class="panel-card">
                     <div class="panel-card-header">
                         <h3>Grupos publicos</h3>
                         <button id="reload-public-groups-btn" class="ghost" type="button">Recargar</button>
@@ -215,6 +146,77 @@
                     <div id="public-groups-list" class="stack-list"></div>
                 </article>
             </section>
+
+            <article id="group-detail-card" class="panel-card hidden">
+                <div class="panel-card-header">
+                    <h3>Detalle del grupo</h3>
+                    <div class="card-actions">
+                        <button id="toggle-group-members-btn" class="ghost" type="button">Ver miembros</button>
+                        <button id="hide-group-detail-btn" class="ghost" type="button">Cerrar</button>
+                    </div>
+                </div>
+                <div id="group-detail-content" class="stack-list"></div>
+                <div class="content-grid group-detail-grid">
+                    <div class="panel-section">
+                        <div class="panel-card-header">
+                            <h3>Prestamos del grupo</h3>
+                            <div class="card-actions">
+                                <button id="reload-group-loans-btn" class="ghost" type="button">Recargar</button>
+                                <button id="show-group-loan-form-btn" type="button">Solicitar prestamo</button>
+                            </div>
+                        </div>
+                        <div id="group-loans-list" class="stack-list"></div>
+                    </div>
+                    <div class="panel-section">
+                        <div class="panel-card-header">
+                            <h3>Chat del grupo</h3>
+                            <button id="reload-group-messages-btn" class="ghost" type="button">Recargar</button>
+                        </div>
+                        <div id="group-messages-list" class="chat-list"></div>
+                        <form id="group-message-form" class="stack compact-form">
+                            <textarea id="group-message-text" class="text-area chat-area" placeholder="Escribe un mensaje para el grupo"></textarea>
+                            <button type="submit">Enviar mensaje</button>
+                        </form>
+                    </div>
+                </div>
+            </article>
+
+            <article id="group-loan-form-card" class="panel-card hidden">
+                <div class="panel-card-header">
+                    <h3>Solicitar prestamo dentro del grupo</h3>
+                    <button id="hide-group-loan-form-btn" class="ghost" type="button">Cancelar</button>
+                </div>
+                    <form id="group-loan-form" class="stack">
+                        <input type="text" id="group-loan-target-name" list="group-loan-members" placeholder="Escribe el nombre o selecciona una persona del grupo" required>
+                        <datalist id="group-loan-members"></datalist>
+                        <input type="hidden" id="group-loan-target-id">
+                        <div class="money-input-shell">
+                            <button type="button" id="decrease-group-loan-amount" class="ghost amount-stepper">-50</button>
+                            <input type="text" id="group-loan-amount" inputmode="numeric" placeholder="Monto solicitado desde 1.000 COP" required>
+                            <button type="button" id="increase-group-loan-amount" class="ghost amount-stepper">+50</button>
+                        </div>
+                        <label class="field-hint" for="group-loan-due-date">Fecha a pagar</label>
+                        <input type="datetime-local" id="group-loan-due-date" required>
+                        <textarea id="group-loan-description" class="text-area" placeholder="Motivo del prestamo"></textarea>
+                        <button type="submit">Enviar solicitud de prestamo</button>
+                </form>
+            </article>
+
+            <article id="create-group-card" class="panel-card hidden">
+                <div class="panel-card-header">
+                    <h3>Crear grupo</h3>
+                    <button id="hide-create-group-btn" class="ghost" type="button">Cancelar</button>
+                </div>
+                <form id="group-form" class="stack">
+                    <input type="text" id="group-name" placeholder="Nombre del grupo" required>
+                    <input type="number" id="group-max-members" min="2" max="50" value="10" placeholder="Cantidad maxima de personas" required>
+                    <label class="checkbox-line">
+                        <input type="checkbox" id="group-private">
+                        <span>Grupo privado</span>
+                    </label>
+                    <button type="submit">Guardar grupo</button>
+                </form>
+            </article>
 
             <section id="view-usuarios" class="dashboard-view">
                 <article class="panel-card">
@@ -230,13 +232,6 @@
                     </div>
                     <div id="users-list" class="table-list"></div>
                 </article>
-
-                <article class="panel-card">
-                    <div class="panel-card-header">
-                        <h3>Busqueda de usuarios</h3>
-                    </div>
-                    <p class="empty-state">Las solicitudes de prestamo ahora se hacen solo dentro de cada grupo con miembros activos.</p>
-                </article>
             </section>
 
             <section id="view-amigos" class="dashboard-view">
@@ -247,9 +242,7 @@
                     </div>
                     <div id="friends-list" class="table-list"></div>
                 </article>
-            </section>
 
-            <section id="view-solicitudes" class="dashboard-view">
                 <div class="content-grid">
                     <article class="panel-card">
                         <div class="panel-card-header">
@@ -309,31 +302,6 @@
                     </div>
                     <div id="expenses-list" class="table-list"></div>
                 </article>
-            </section>
-
-            <section id="view-pagos" class="dashboard-view">
-                <div class="content-grid">
-                    <article class="panel-card">
-                        <div class="panel-card-header">
-                            <h3>Registrar pago</h3>
-                            <button id="reload-payment-users-btn" class="ghost" type="button">Recargar</button>
-                        </div>
-                        <form id="payment-form" class="stack">
-                            <select id="payment-group"><option value="">Sin grupo</option></select>
-                            <select id="payment-to-user" required></select>
-                            <input type="number" id="payment-amount" placeholder="Monto a pagar" min="0" step="0.01" required>
-                            <button type="submit">Registrar pago</button>
-                        </form>
-                    </article>
-
-                    <article class="panel-card">
-                        <div class="panel-card-header">
-                            <h3>Historial de pagos</h3>
-                            <button id="reload-payments-btn" class="ghost" type="button">Recargar</button>
-                        </div>
-                        <div id="payments-list" class="table-list"></div>
-                    </article>
-                </div>
             </section>
 
             <pre id="message-box" class="console-box hidden"></pre>
