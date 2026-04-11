@@ -183,6 +183,8 @@ const getMyLoans = async (req, res) => {
                 borrower.name AS borrower_name,
                 l.amount,
                 l.total_amount,
+                COALESCE(SUM(p.amount), 0) AS total_paid,
+                GREATEST(l.total_amount - COALESCE(SUM(p.amount), 0), 0) AS remaining_amount,
                 l.due_date,
                 l.status,
                 l.description,
@@ -190,9 +192,11 @@ const getMyLoans = async (req, res) => {
              FROM loans l
              JOIN users lender ON lender.id = l.lender_id
              JOIN users borrower ON borrower.id = l.borrower_id
+             LEFT JOIN payments p ON p.loan_id = l.id
              WHERE (l.lender_id = $1
                 OR l.borrower_id = $1)
                ${groupFilter}
+             GROUP BY l.id, lender.name, borrower.name
              ORDER BY l.created_at DESC`,
             params
         );

@@ -1,6 +1,6 @@
 const pool = require('../db/connection');
 
-const MAX_GROUP_MEMBERS_LIMIT = 50;
+const FIXED_GROUP_MEMBERS_LIMIT = 15;
 
 const getGroupCapacity = async (client, groupId) => {
     const result = await client.query(
@@ -58,9 +58,10 @@ const createGroup = async (req, res) => {
     try {
         const {
             name,
+            description,
             is_private: isPrivate = false,
             members = [],
-            max_members: maxMembers = 10
+            max_members: maxMembers = FIXED_GROUP_MEMBERS_LIMIT
         } = req.body;
 
         const normalizedMaxMembers = Number(maxMembers);
@@ -69,9 +70,30 @@ const createGroup = async (req, res) => {
             return res.status(400).json({ error: 'El nombre del grupo es obligatorio' });
         }
 
-        if (!Number.isInteger(normalizedMaxMembers) || normalizedMaxMembers < 2 || normalizedMaxMembers > MAX_GROUP_MEMBERS_LIMIT) {
+        if (!description || !description.trim()) {
+            return res.status(400).json({ error: 'La descripcion del grupo es obligatoria' });
+        }
+
+        if (!isPrivate) {
+            const duplicatePublicGroupResult = await client.query(
+                `SELECT id
+                 FROM groups
+                 WHERE is_private = FALSE
+                   AND LOWER(TRIM(name)) = LOWER(TRIM($1))
+                 LIMIT 1`,
+                [name]
+            );
+
+            if (duplicatePublicGroupResult.rows.length > 0) {
+                return res.status(409).json({
+                    error: 'Ya existe un grupo publico con ese nombre'
+                });
+            }
+        }
+
+        if (!Number.isInteger(normalizedMaxMembers) || normalizedMaxMembers !== FIXED_GROUP_MEMBERS_LIMIT) {
             return res.status(400).json({
-                error: `max_members debe ser un numero entero entre 2 y ${MAX_GROUP_MEMBERS_LIMIT}`
+                error: `La cantidad maxima de personas debe ser ${FIXED_GROUP_MEMBERS_LIMIT}`
             });
         }
 
@@ -111,10 +133,10 @@ const createGroup = async (req, res) => {
         }
 
         const groupResult = await client.query(
-            `INSERT INTO groups (name, is_private, created_by, max_members)
-             VALUES ($1, $2, $3, $4)
-             RETURNING id, name, is_private, created_by, max_members, created_at`,
-            [name.trim(), isPrivate, req.user.id, normalizedMaxMembers]
+            `INSERT INTO groups (name, description, is_private, created_by, max_members)
+             VALUES ($1, $2, $3, $4, $5)
+             RETURNING id, name, description, is_private, created_by, max_members, created_at`,
+            [name.trim(), description.trim(), isPrivate, req.user.id, normalizedMaxMembers]
         );
 
         const createdMembers = [];
@@ -261,10 +283,20 @@ const addGroupMember = async (req, res) => {
 
 const getMyGroups = async (req, res) => {
     try {
+        const { search = '' } = req.query;
+        const params = [req.user.id];
+        let searchFilter = '';
+
+        if (search.trim()) {
+            params.push(`%${search.trim()}%`);
+            searchFilter = 'AND g.name ILIKE $2';
+        }
+
         const result = await pool.query(
             `SELECT
                 g.id,
                 g.name,
+                g.description,
                 g.is_private,
                 g.max_members,
                 g.created_by,
@@ -276,9 +308,10 @@ const getMyGroups = async (req, res) => {
              LEFT JOIN group_members active_members ON active_members.group_id = g.id
              WHERE gm.user_id = $1
                AND gm.left_at IS NULL
+               ${searchFilter}
              GROUP BY g.id, gm.role
              ORDER BY g.created_at DESC`,
-            [req.user.id]
+            params
         );
 
         return res.json({ groups: result.rows });
@@ -306,7 +339,7 @@ const getGroupDetails = async (req, res) => {
         }
 
         const groupResult = await pool.query(
-            `SELECT id, name, is_private, max_members, created_by, created_at
+            `SELECT id, name, description, is_private, max_members, created_by, created_at
              FROM groups
              WHERE id = $1`,
             [groupId]
@@ -337,10 +370,20 @@ const getGroupDetails = async (req, res) => {
 
 const getPublicGroups = async (req, res) => {
     try {
+        const { search = '' } = req.query;
+        const params = [req.user.id];
+        let searchFilter = '';
+
+        if (search.trim()) {
+            params.push(`%${search.trim()}%`);
+            searchFilter = 'AND g.name ILIKE $2';
+        }
+
         const result = await pool.query(
             `SELECT
                 g.id,
                 g.name,
+                g.description,
                 g.is_private,
                 g.max_members,
                 g.created_by,
@@ -358,9 +401,10 @@ const getPublicGroups = async (req, res) => {
              JOIN users creator ON creator.id = g.created_by
              LEFT JOIN group_members gm ON gm.group_id = g.id
              WHERE g.is_private = FALSE
+               ${searchFilter}
              GROUP BY g.id, creator.name
              ORDER BY g.created_at DESC`,
-            [req.user.id]
+            params
         );
 
         return res.json({ groups: result.rows });

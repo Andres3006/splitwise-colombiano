@@ -37,13 +37,33 @@ const els = {
     shortcuts: [...document.querySelectorAll('.nav-shortcut')],
     userSearchForm: $('user-search-form'),
     userSearch: $('user-search'),
+    groupSearchForm: $('group-search-form'),
+    groupSearch: $('group-search'),
     groupForm: $('group-form'),
+    createGroupCard: $('create-group-card'),
+    showCreateGroupBtn: $('show-create-group-btn'),
+    hideCreateGroupBtn: $('hide-create-group-btn'),
+    groupName: $('group-name'),
+    groupDescription: $('group-description'),
+    groupMaxMembers: $('group-max-members'),
+    groupPrivate: $('group-private'),
     groupDetailCard: $('group-detail-card'),
     groupDetailContent: $('group-detail-content'),
     hideGroupDetailBtn: $('hide-group-detail-btn'),
     toggleGroupMembersBtn: $('toggle-group-members-btn'),
     expenseForm: $('expense-form'),
     depositForm: $('deposit-form'),
+    withdrawForm: $('withdraw-form'),
+    debtPaymentForm: $('debt-payment-form'),
+    debtPaymentFormCard: $('debt-payment-form-card'),
+    hideDebtPaymentFormBtn: $('hide-debt-payment-form-btn'),
+    debtPaymentPerson: $('debt-payment-person'),
+    debtPaymentUserId: $('debt-payment-user-id'),
+    debtPaymentGroupId: $('debt-payment-group-id'),
+    debtPaymentLoanId: $('debt-payment-loan-id'),
+    debtPaymentAmount: $('debt-payment-amount'),
+    increaseDebtPaymentAmountBtn: $('increase-debt-payment-amount'),
+    decreaseDebtPaymentAmountBtn: $('decrease-debt-payment-amount'),
     paymentForm: $('payment-form'),
     groupLoanForm: $('group-loan-form'),
     groupLoanFormCard: $('group-loan-form-card'),
@@ -96,6 +116,8 @@ const splitTypeLabels = { equal: 'Division equitativa', custom: 'Division person
 const invitationStatusLabels = { pending: 'Pendiente', accepted: 'Aceptada', rejected: 'Rechazada' };
 const MIN_GROUP_LOAN_AMOUNT = 1000;
 const GROUP_LOAN_STEP = 50;
+const MIN_DEBT_PAYMENT_AMOUNT = 50;
+const DEBT_PAYMENT_STEP = 50;
 const MAX_GROUP_LOAN_TERM_DAYS = 15;
 let groupMessagesPollId = null;
 let messageTimeoutId = null;
@@ -239,6 +261,7 @@ const renderList = (target, items, renderer, emptyText) => {
     if (!target) return;
     target.innerHTML = items.length ? items.map(renderer).join('') : `<p class="empty-state">${emptyText}</p>`;
 };
+const currentGroupSearch = () => els.groupSearch?.value?.trim() || '';
 
 function renderMetrics() {
     $('metric-pay').textContent = money.format(Number(state.dashboard.total_to_pay || 0));
@@ -401,6 +424,55 @@ function renderBalances(target = els.balancesList) {
     `, 'No hay balances pendientes.');
 }
 
+function renderMyDebts() {
+    const balanceDebts = state.balances
+        .filter((balance) => balance.debtor_id === state.user?.id)
+        .map((balance) => ({
+            kind: 'balance',
+            personName: balance.creditor_name,
+            personId: balance.creditor_id,
+            amount: Number(balance.amount),
+            groupId: balance.group_id || '',
+            loanId: ''
+        }));
+
+    const loanDebts = state.loans
+        .filter((loan) => loan.borrower_id === state.user?.id && loan.status === 'active' && Number(loan.remaining_amount || 0) > 0)
+        .map((loan) => ({
+            kind: 'loan',
+            personName: loan.lender_name,
+            personId: loan.lender_id,
+            amount: Number(loan.remaining_amount),
+            groupId: loan.group_id || '',
+            loanId: loan.id
+        }));
+
+    const myDebts = [...balanceDebts, ...loanDebts];
+
+    renderList(els.balancesList, myDebts, (debt) => `
+        <div class="info-card">
+            <div>
+                <strong>${money.format(Number(debt.amount))}</strong>
+                <p>Le debes a ${debt.personName}</p>
+                <p>${debt.kind === 'loan' ? 'Prestamo pendiente' : 'Balance pendiente'}</p>
+            </div>
+            <div class="card-actions">
+                <button
+                    type="button"
+                    data-action="open-debt-payment-form"
+                    data-person-name="${debt.personName}"
+                    data-user-id="${debt.personId}"
+                    data-amount="${debt.amount}"
+                    data-group-id="${debt.groupId}"
+                    data-loan-id="${debt.loanId}"
+                >
+                    Consignarle dinero
+                </button>
+            </div>
+        </div>
+    `, 'No tienes deudas pendientes.');
+}
+
 function renderOptimize() {
     renderList(els.optimizeList, state.optimize, (payment) => {
         const from = state.users.find((user) => user.id === payment.from_user)?.name || payment.from_user;
@@ -463,6 +535,20 @@ function renderSocialUsers() {
             <div>
                 <strong>${user.name}</strong>
                 <p>${user.email}</p>
+            </div>
+            <div class="card-actions">
+                ${user.is_friend ? `
+                    <span class="chip">Amigo</span>
+                    <button type="button" class="ghost" data-action="remove-friend" data-user-id="${user.id}">Dejar de ser amigos</button>
+                ` : user.pending_request_direction === 'sent' ? `
+                    <span class="chip">Solicitud enviada</span>
+                    <button type="button" class="ghost" data-action="cancel-friend-request" data-request-id="${user.pending_request_id}">Cancelar solicitud</button>
+                ` : user.pending_request_direction === 'received' ? `
+                    <span class="chip">Te envio solicitud</span>
+                    <button type="button" data-action="respond-friend-request" data-request-id="${user.pending_request_id}" data-response="accept">Aceptar</button>
+                ` : `
+                    <button type="button" data-action="send-friend-request" data-user-id="${user.id}">Invitar a ser amigos</button>
+                `}
             </div>
         </div>
     `, 'No se encontraron usuarios.');
@@ -587,7 +673,7 @@ function renderAll() {
     renderSidebarGroups();
     renderGroupDetail();
     renderPublicGroups();
-    renderBalances();
+    renderMyDebts();
     renderBalances(els.expenseBalancesList);
     renderOptimize();
     renderExpenses();
@@ -617,8 +703,14 @@ async function fetchSession() {
 }
 
 const loadUsers = async () => { state.users = (await api('/api/users')).users; };
-const loadGroups = async () => { state.groups = (await api('/api/groups/me')).groups; };
-const loadPublicGroups = async () => { state.publicGroups = (await api('/api/groups/public')).groups; };
+const loadGroups = async (search = currentGroupSearch()) => {
+    const query = search ? `?search=${encodeURIComponent(search)}` : '';
+    state.groups = (await api(`/api/groups/me${query}`)).groups;
+};
+const loadPublicGroups = async (search = currentGroupSearch()) => {
+    const query = search ? `?search=${encodeURIComponent(search)}` : '';
+    state.publicGroups = (await api(`/api/groups/public${query}`)).groups;
+};
 const loadGroupDetails = async (groupId) => { state.selectedGroup = await api(`/api/groups/${groupId}`); };
 const loadBalances = async () => { state.balances = (await api('/api/balances/me')).balances; };
 const loadExpenses = async () => { state.expenses = (await api('/api/expenses')).expenses; };
@@ -682,6 +774,19 @@ async function refreshSocialData() {
     renderFriendRequests();
 }
 
+async function refreshGroupsData(search = currentGroupSearch()) {
+    await Promise.all([
+        loadGroups(search),
+        loadPublicGroups(search),
+        loadGroupInvitations()
+    ]);
+    renderGroups();
+    renderPublicGroups();
+    renderGroupInvitations();
+    renderSidebarGroups();
+    updateGroupSelectors();
+}
+
 function showCreateGroupCard() {
     els.createGroupCard.classList.remove('hidden');
     els.createGroupCard.scrollIntoView({ behavior: 'smooth', block: 'start' });
@@ -690,7 +795,9 @@ function showCreateGroupCard() {
 function hideCreateGroupCard() {
     els.createGroupCard.classList.add('hidden');
     els.groupForm.reset();
-    els.groupMaxMembers.value = 10;
+    if (els.groupMaxMembers) {
+        els.groupMaxMembers.value = 15;
+    }
 }
 
 function openGroupLoanForm(userId = '', userName = '') {
@@ -712,6 +819,28 @@ function hideGroupLoanForm() {
     configureGroupLoanDueDate();
 }
 
+function openDebtPaymentForm(personName = '', userId = '', amount = 0, groupId = '', loanId = '') {
+    if (!els.debtPaymentFormCard) return;
+    els.debtPaymentFormCard.classList.remove('hidden');
+    els.debtPaymentPerson.value = personName;
+    els.debtPaymentUserId.value = userId;
+    els.debtPaymentGroupId.value = groupId;
+    els.debtPaymentLoanId.value = loanId;
+    els.debtPaymentAmount.dataset.maxAmount = String(Number(amount || 0));
+    setDebtPaymentAmountValue(amount);
+    els.debtPaymentFormCard.scrollIntoView({ behavior: 'smooth', block: 'start' });
+}
+
+function hideDebtPaymentForm() {
+    if (!els.debtPaymentFormCard || !els.debtPaymentForm) return;
+    els.debtPaymentFormCard.classList.add('hidden');
+    els.debtPaymentForm.reset();
+    els.debtPaymentUserId.value = '';
+    els.debtPaymentGroupId.value = '';
+    els.debtPaymentLoanId.value = '';
+    delete els.debtPaymentAmount.dataset.maxAmount;
+}
+
 function setGroupLoanAmountValue(value) {
     if (!els.groupLoanAmount) return;
     const normalized = Math.max(MIN_GROUP_LOAN_AMOUNT, Math.round(Number(value || 0)));
@@ -722,6 +851,22 @@ function adjustGroupLoanAmount(delta) {
     const current = parseMoneyInput(els.groupLoanAmount?.value || 0);
     const next = Math.max(MIN_GROUP_LOAN_AMOUNT, current + delta);
     setGroupLoanAmountValue(next);
+}
+
+function setDebtPaymentAmountValue(value) {
+    if (!els.debtPaymentAmount) return;
+    const maxAmount = Number(els.debtPaymentAmount.dataset.maxAmount || 0);
+    const fallbackValue = Math.max(MIN_DEBT_PAYMENT_AMOUNT, Math.round(Number(value || 0)));
+    const normalized = Math.min(fallbackValue, maxAmount || fallbackValue);
+    els.debtPaymentAmount.value = formatMoneyInput(normalized);
+}
+
+function adjustDebtPaymentAmount(delta) {
+    if (!els.debtPaymentAmount) return;
+    const current = parseMoneyInput(els.debtPaymentAmount.value || 0);
+    const maxAmount = Number(els.debtPaymentAmount.dataset.maxAmount || 0);
+    const next = Math.min(Math.max(MIN_DEBT_PAYMENT_AMOUNT, current + delta), maxAmount || current + delta);
+    setDebtPaymentAmountValue(next);
 }
 
 function formatDateTimeLocal(date) {
@@ -771,6 +916,7 @@ async function handleCreateGroup(event) {
             method: 'POST',
             body: JSON.stringify({
                 name: els.groupName.value,
+                description: els.groupDescription.value,
                 is_private: els.groupPrivate.checked,
                 max_members: Number(els.groupMaxMembers.value)
             })
@@ -873,6 +1019,24 @@ async function handleDeposit(event) {
     }
 }
 
+async function handleWithdraw(event) {
+    event.preventDefault();
+    try {
+        await api('/api/users/me/wallet/withdraw', {
+            method: 'POST',
+            body: JSON.stringify({
+                amount: Number($('withdraw-amount').value)
+            })
+        });
+        els.withdrawForm.reset();
+        await loadDashboard();
+        renderMetrics();
+        setMessage('Dinero retirado correctamente.');
+    } catch (error) {
+        setMessage(error.message);
+    }
+}
+
 async function handleCreateLoan(event) {
     event.preventDefault();
     try {
@@ -960,6 +1124,12 @@ async function handleSendFriendRequest(userId) {
     setMessage('Solicitud de amistad enviada.');
 }
 
+async function handleRemoveFriend(friendId) {
+    await api(`/api/social/friends/${friendId}`, { method: 'DELETE' });
+    await refreshSocialData();
+    setMessage('Amistad eliminada.');
+}
+
 async function handleCancelFriendRequest(requestId) {
     await api(`/api/social/friend-requests/${requestId}`, { method: 'DELETE' });
     await refreshSocialData();
@@ -987,6 +1157,34 @@ async function handleRespondGroupInvitation(invitationId, action) {
     renderMetrics();
     updateGroupSelectors();
     setMessage(action === 'accept' ? 'Invitacion aceptada.' : 'Invitacion rechazada.');
+}
+
+async function handleDebtPayment(event) {
+    event.preventDefault();
+
+    const normalizedAmount = parseMoneyInput(els.debtPaymentAmount?.value || 0);
+    const maxAmount = Number(els.debtPaymentAmount?.dataset.maxAmount || 0);
+
+    if (!Number.isFinite(normalizedAmount) || normalizedAmount <= 0) {
+        throw new Error('Debes ingresar un monto valido para pagar');
+    }
+
+    if (maxAmount && normalizedAmount > maxAmount) {
+        throw new Error('No puedes pagar mas de lo que debes');
+    }
+
+    await api('/api/payments', {
+        method: 'POST',
+        body: JSON.stringify({
+            to_user: els.debtPaymentUserId.value,
+            amount: normalizedAmount,
+            group_id: els.debtPaymentGroupId.value || null,
+            loan_id: els.debtPaymentLoanId.value || null
+        })
+    });
+    hideDebtPaymentForm();
+    await loadAll();
+    setMessage('Pago registrado correctamente.');
 }
 
 async function handleRespondLoan(loanId, action) {
@@ -1030,6 +1228,10 @@ async function handleSendGroupMessage(event) {
         els.groupForm?.addEventListener('submit', handleCreateGroup);
         els.expenseForm?.addEventListener('submit', handleCreateExpense);
         els.depositForm?.addEventListener('submit', handleDeposit);
+        els.withdrawForm?.addEventListener('submit', handleWithdraw);
+        els.debtPaymentForm?.addEventListener('submit', (event) => {
+            handleDebtPayment(event).catch((error) => setMessage(error.message));
+        });
         els.paymentForm?.addEventListener('submit', handleCreatePayment);
         els.groupLoanForm?.addEventListener('submit', handleCreateLoan);
     els.groupMessageForm?.addEventListener('submit', handleSendGroupMessage);
@@ -1065,9 +1267,16 @@ async function handleSendGroupMessage(event) {
         renderGroupDetail();
     });
     els.hideGroupLoanFormBtn?.addEventListener('click', hideGroupLoanForm);
+    els.hideDebtPaymentFormBtn?.addEventListener('click', hideDebtPaymentForm);
     els.increaseGroupLoanAmountBtn?.addEventListener('click', () => adjustGroupLoanAmount(GROUP_LOAN_STEP));
     els.decreaseGroupLoanAmountBtn?.addEventListener('click', () => adjustGroupLoanAmount(-GROUP_LOAN_STEP));
+    els.increaseDebtPaymentAmountBtn?.addEventListener('click', () => adjustDebtPaymentAmount(DEBT_PAYMENT_STEP));
+    els.decreaseDebtPaymentAmountBtn?.addEventListener('click', () => adjustDebtPaymentAmount(-DEBT_PAYMENT_STEP));
     els.groupLoanAmount?.addEventListener('input', (event) => {
+        const parsed = parseMoneyInput(event.target.value);
+        event.target.value = parsed ? formatMoneyInput(parsed) : '';
+    });
+    els.debtPaymentAmount?.addEventListener('input', (event) => {
         const parsed = parseMoneyInput(event.target.value);
         event.target.value = parsed ? formatMoneyInput(parsed) : '';
     });
@@ -1075,6 +1284,11 @@ async function handleSendGroupMessage(event) {
         const parsed = parseMoneyInput(els.groupLoanAmount.value);
         if (!parsed) return;
         setGroupLoanAmountValue(parsed);
+    });
+    els.debtPaymentAmount?.addEventListener('blur', () => {
+        const parsed = parseMoneyInput(els.debtPaymentAmount.value);
+        if (!parsed) return;
+        setDebtPaymentAmountValue(parsed);
     });
     els.groupLoanAmount?.addEventListener('keydown', (event) => {
         if (event.key === 'ArrowUp') {
@@ -1087,6 +1301,17 @@ async function handleSendGroupMessage(event) {
             adjustGroupLoanAmount(-GROUP_LOAN_STEP);
         }
     });
+    els.debtPaymentAmount?.addEventListener('keydown', (event) => {
+        if (event.key === 'ArrowUp') {
+            event.preventDefault();
+            adjustDebtPaymentAmount(DEBT_PAYMENT_STEP);
+        }
+
+        if (event.key === 'ArrowDown') {
+            event.preventDefault();
+            adjustDebtPaymentAmount(-DEBT_PAYMENT_STEP);
+        }
+    });
 
     els.userSearchForm?.addEventListener('submit', async (event) => {
         event.preventDefault();
@@ -1095,6 +1320,27 @@ async function handleSendGroupMessage(event) {
             renderSocialUsers();
             setActiveView('usuarios');
             setMessage(`Busqueda actualizada para "${els.userSearch.value || 'todos'}".`);
+        } catch (error) {
+            setMessage(error.message);
+        }
+    });
+
+    els.groupSearchForm?.addEventListener('submit', async (event) => {
+        event.preventDefault();
+        try {
+            await refreshGroupsData(currentGroupSearch());
+            setActiveView('grupos');
+            setMessage(`Busqueda de grupos actualizada para "${currentGroupSearch() || 'todos'}".`);
+        } catch (error) {
+            setMessage(error.message);
+        }
+    });
+
+    els.groupSearch?.addEventListener('input', async (event) => {
+        if (event.target.value.trim()) return;
+
+        try {
+            await refreshGroupsData('');
         } catch (error) {
             setMessage(error.message);
         }
@@ -1125,9 +1371,9 @@ async function handleSendGroupMessage(event) {
     });
 
     [
-        ['reload-groups-btn', () => loadGroups().then(() => { renderGroups(); updateGroupSelectors(); setMessage('Mis grupos recargados.'); })],
-        ['reload-public-groups-btn', () => loadPublicGroups().then(() => { renderPublicGroups(); setMessage('Grupos publicos recargados.'); })],
-        ['reload-balances-btn', () => loadBalances().then(() => { renderBalances(); renderBalances(els.expenseBalancesList); setMessage('Balances recargados.'); })],
+        ['reload-groups-btn', () => loadGroups(currentGroupSearch()).then(() => { renderGroups(); updateGroupSelectors(); setMessage('Mis grupos recargados.'); })],
+        ['reload-public-groups-btn', () => loadPublicGroups(currentGroupSearch()).then(() => { renderPublicGroups(); setMessage('Grupos publicos recargados.'); })],
+        ['reload-balances-btn', () => loadBalances().then(() => { renderMyDebts(); renderBalances(els.expenseBalancesList); setMessage('Deudas recargadas.'); })],
         ['reload-expense-balances-btn', () => loadBalances().then(() => { renderBalances(); renderBalances(els.expenseBalancesList); setMessage('Balances recargados.'); })],
         ['reload-optimize-btn', () => loadOptimize().then(() => { renderOptimize(); setMessage('Optimizacion recalculada.'); })],
         ['reload-expenses-btn', () => loadExpenses().then(() => { renderExpenses(); setMessage('Gastos recargados.'); })],
@@ -1157,9 +1403,17 @@ async function handleSendGroupMessage(event) {
             if (action === 'open-group-detail') await handleOpenGroupDetail(button.dataset.groupId);
             if (action === 'leave-group') await handleLeaveGroup(button.dataset.groupId);
             if (action === 'send-friend-request') await handleSendFriendRequest(button.dataset.userId);
+            if (action === 'remove-friend') await handleRemoveFriend(button.dataset.userId);
             if (action === 'cancel-friend-request') await handleCancelFriendRequest(button.dataset.requestId);
             if (action === 'respond-friend-request') await handleRespondFriendRequest(button.dataset.requestId, button.dataset.response);
             if (action === 'respond-group-invitation') await handleRespondGroupInvitation(button.dataset.invitationId, button.dataset.response);
+            if (action === 'open-debt-payment-form') openDebtPaymentForm(
+                button.dataset.personName,
+                button.dataset.userId,
+                button.dataset.amount,
+                button.dataset.groupId,
+                button.dataset.loanId
+            );
             if (action === 'open-group-loan-form') openGroupLoanForm(button.dataset.userId, button.dataset.userName);
             if (action === 'respond-loan') await handleRespondLoan(button.dataset.loanId, button.dataset.response);
             if (action === 'cancel-loan') await handleCancelLoan(button.dataset.loanId);

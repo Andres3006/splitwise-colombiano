@@ -26,7 +26,32 @@ const listUsers = async (req, res) => {
                     FROM friendships f
                     WHERE (f.user_one_id = u.id AND f.user_two_id = $1)
                        OR (f.user_two_id = u.id AND f.user_one_id = $1)
-                ) AS is_friend
+                ) AS is_friend,
+                (
+                    SELECT fr.id
+                    FROM friend_requests fr
+                    WHERE fr.status = 'pending'
+                      AND (
+                            (fr.sender_id = $1 AND fr.receiver_id = u.id)
+                         OR (fr.sender_id = u.id AND fr.receiver_id = $1)
+                      )
+                    ORDER BY fr.created_at DESC
+                    LIMIT 1
+                ) AS pending_request_id,
+                (
+                    SELECT CASE
+                        WHEN fr.sender_id = $1 THEN 'sent'
+                        ELSE 'received'
+                    END
+                    FROM friend_requests fr
+                    WHERE fr.status = 'pending'
+                      AND (
+                            (fr.sender_id = $1 AND fr.receiver_id = u.id)
+                         OR (fr.sender_id = u.id AND fr.receiver_id = $1)
+                      )
+                    ORDER BY fr.created_at DESC
+                    LIMIT 1
+                ) AS pending_request_direction
              FROM users u
              WHERE u.id <> $1
                ${searchFilter}
@@ -334,11 +359,98 @@ const getFriends = async (req, res) => {
     }
 };
 
+const removeFriend = async (req, res) => {
+    const client = await pool.connect();
+
+    try {
+        const { friendId } = req.params;
+
+        if (!friendId) {
+            return res.status(400).json({ error: 'El friendId es obligatorio' });
+        }
+
+        if (friendId === req.user.id) {
+            return res.status(400).json({ error: 'No puedes eliminarte a ti mismo' });
+        }
+
+        await client.query('BEGIN');
+
+        const [userOneId, userTwoId] = normalizeFriendPair(req.user.id, friendId);
+
+        const friendshipResult = await client.query(
+            `SELECT id
+             FROM friendships
+             WHERE user_one_id = $1
+               AND user_two_id = $2
+             LIMIT 1`,
+            [userOneId, userTwoId]
+        );
+
+        if (friendshipResult.rows.length === 0) {
+            await client.query('ROLLBACK');
+            return res.status(404).json({ error: 'No existe una amistad con ese usuario' });
+        }
+
+        const pendingBalanceResult = await client.query(
+            `SELECT 1
+             FROM balances
+             WHERE (
+                    (debtor_id = $1 AND creditor_id = $2)
+                 OR (debtor_id = $2 AND creditor_id = $1)
+             )
+             LIMIT 1`,
+            [req.user.id, friendId]
+        );
+
+        if (pendingBalanceResult.rows.length > 0) {
+            await client.query('ROLLBACK');
+            return res.status(409).json({
+                error: 'No puedes dejar de ser amigo mientras existan deudas pendientes entre ambos'
+            });
+        }
+
+        const pendingLoanResult = await client.query(
+            `SELECT 1
+             FROM loans
+             WHERE status IN ('pending', 'active')
+               AND (
+                    (borrower_id = $1 AND lender_id = $2)
+                 OR (borrower_id = $2 AND lender_id = $1)
+               )
+             LIMIT 1`,
+            [req.user.id, friendId]
+        );
+
+        if (pendingLoanResult.rows.length > 0) {
+            await client.query('ROLLBACK');
+            return res.status(409).json({
+                error: 'No puedes dejar de ser amigo mientras existan prestamos pendientes entre ambos'
+            });
+        }
+
+        await client.query(
+            `DELETE FROM friendships
+             WHERE id = $1`,
+            [friendshipResult.rows[0].id]
+        );
+
+        await client.query('COMMIT');
+
+        return res.json({ message: 'Amistad eliminada correctamente' });
+    } catch (error) {
+        await client.query('ROLLBACK');
+        return res.status(500).json({ error: error.message });
+    } finally {
+        client.release();
+    }
+};
+
 module.exports = {
     listUsers,
     sendFriendRequest,
     getFriendRequests,
     cancelFriendRequest,
     respondFriendRequest,
-    getFriends
+    getFriends,
+    removeFriend
 };

@@ -128,6 +128,9 @@ const ensureSplitwiseSchema = async () => {
         ADD CONSTRAINT groups_max_members_check
         CHECK (max_members BETWEEN 2 AND 50);
 
+        ALTER TABLE groups
+        ADD COLUMN IF NOT EXISTS description TEXT;
+
         ALTER TABLE loans
         ADD COLUMN IF NOT EXISTS description TEXT;
 

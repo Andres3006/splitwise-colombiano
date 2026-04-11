@@ -7,7 +7,8 @@ const {
     getFriendRequests,
     cancelFriendRequest,
     respondFriendRequest,
-    getFriends
+    getFriends,
+    removeFriend
 } = require('../controllers/social.controller');
 
 const router = express.Router();
@@ -18,5 +19,6 @@ router.get('/friend-requests', verifyToken, getFriendRequests);
 router.delete('/friend-requests/:requestId', verifyToken, cancelFriendRequest);
 router.patch('/friend-requests/:requestId/respond', verifyToken, respondFriendRequest);
 router.get('/friends', verifyToken, getFriends);
+router.delete('/friends/:friendId', verifyToken, removeFriend);
 
 module.exports = router;
