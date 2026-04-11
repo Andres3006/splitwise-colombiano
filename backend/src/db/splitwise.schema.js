@@ -57,6 +57,71 @@ const ensureSplitwiseSchema = async () => {
 
         CREATE INDEX IF NOT EXISTS idx_balances_creditor_id
         ON balances (creditor_id);
+
+        CREATE TABLE IF NOT EXISTS friend_requests (
+            id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+            sender_id UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+            receiver_id UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+            status VARCHAR(20) NOT NULL DEFAULT 'pending',
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            responded_at TIMESTAMP,
+            CHECK (sender_id <> receiver_id)
+        );
+
+        CREATE TABLE IF NOT EXISTS friendships (
+            id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+            user_one_id UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+            user_two_id UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            CHECK (user_one_id <> user_two_id),
+            UNIQUE (user_one_id, user_two_id)
+        );
+
+        CREATE TABLE IF NOT EXISTS group_messages (
+            id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+            group_id UUID NOT NULL REFERENCES groups(id) ON DELETE CASCADE,
+            sender_id UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+            message TEXT NOT NULL,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_friend_requests_sender
+        ON friend_requests (sender_id);
+
+        CREATE INDEX IF NOT EXISTS idx_friend_requests_receiver
+        ON friend_requests (receiver_id);
+
+        CREATE INDEX IF NOT EXISTS idx_friendships_user_one
+        ON friendships (user_one_id);
+
+        CREATE INDEX IF NOT EXISTS idx_friendships_user_two
+        ON friendships (user_two_id);
+
+        CREATE INDEX IF NOT EXISTS idx_group_messages_group_id
+        ON group_messages (group_id);
+
+        CREATE INDEX IF NOT EXISTS idx_group_messages_sender_id
+        ON group_messages (sender_id);
+
+        ALTER TABLE groups
+        ADD COLUMN IF NOT EXISTS max_members INT NOT NULL DEFAULT 10;
+
+        ALTER TABLE groups
+        DROP CONSTRAINT IF EXISTS groups_max_members_check;
+
+        ALTER TABLE groups
+        ADD CONSTRAINT groups_max_members_check
+        CHECK (max_members BETWEEN 2 AND 50);
+
+        ALTER TABLE loans
+        ADD COLUMN IF NOT EXISTS description TEXT;
+
+        ALTER TABLE group_invitations
+        DROP CONSTRAINT IF EXISTS group_invitations_group_id_fkey;
+
+        ALTER TABLE group_invitations
+        ADD CONSTRAINT group_invitations_group_id_fkey
+        FOREIGN KEY (group_id) REFERENCES groups(id) ON DELETE CASCADE;
     `);
 };
 

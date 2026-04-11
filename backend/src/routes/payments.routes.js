@@ -2,13 +2,13 @@ const express = require('express');
 
 const verifyToken = require('../middlewares/auth.middleware');
 const {
-    createExpense,
-    getExpenses
+    registerPayment,
+    getMyPayments
 } = require('../controllers/expenses.controller');
 
 const router = express.Router();
 
-router.get('/', verifyToken, getExpenses);
-router.post('/', verifyToken, createExpense);
+router.get('/me', verifyToken, getMyPayments);
+router.post('/', verifyToken, registerPayment);
 
 module.exports = router;

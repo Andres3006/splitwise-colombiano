@@ -1,3 +1,4 @@
+const env = require('../config/env');
 const jwt = require('jsonwebtoken');
 
 const verifyToken = (req, res, next) => {
@@ -12,7 +13,7 @@ const verifyToken = (req, res, next) => {
         : authHeader;
 
     try {
-        const decoded = jwt.verify(token, 'secreto123');
+        const decoded = jwt.verify(token, env.jwtSecret);
         req.user = decoded;
         next();
     } catch (error) {

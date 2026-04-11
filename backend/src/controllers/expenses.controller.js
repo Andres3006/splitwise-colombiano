@@ -13,6 +13,41 @@ const buildEqualShares = (totalAmount, totalParticipants) => {
     });
 };
 
+const buildCustomShares = (totalAmount, participants) => {
+    if (
+        !participants.every(
+            (participant) => participant && participant.user_id && participant.share_amount !== undefined
+        )
+    ) {
+        const error = new Error('Cada participante debe incluir user_id y share_amount');
+        error.statusCode = 400;
+        throw error;
+    }
+
+    const shares = participants.map((participant) => ({
+        user_id: participant.user_id,
+        share_amount: roundToTwo(Number(participant.share_amount))
+    }));
+
+    const totalShares = roundToTwo(
+        shares.reduce((sum, participant) => sum + participant.share_amount, 0)
+    );
+
+    if (totalShares !== roundToTwo(totalAmount)) {
+        const error = new Error('La suma de share_amount debe coincidir con el monto total');
+        error.statusCode = 400;
+        throw error;
+    }
+
+    if (shares.some((participant) => !Number.isFinite(participant.share_amount) || participant.share_amount < 0)) {
+        const error = new Error('Todos los share_amount deben ser numeros validos');
+        error.statusCode = 400;
+        throw error;
+    }
+
+    return shares;
+};
+
 const getUserMap = async (client, userIds) => {
     const result = await client.query(
         `SELECT id, name, is_banned
@@ -249,6 +284,51 @@ const upsertBalance = async (client, { groupId, debtorId, creditorId, amount }) 
     );
 };
 
+const settleBalance = async (client, { groupId, debtorId, creditorId, amount }) => {
+    if (debtorId === creditorId || amount <= 0) {
+        return null;
+    }
+
+    const directBalance = await client.query(
+        `SELECT id, amount
+         FROM balances
+         WHERE debtor_id = $1
+           AND creditor_id = $2
+           AND group_id IS NOT DISTINCT FROM $3
+         LIMIT 1`,
+        [debtorId, creditorId, groupId]
+    );
+
+    if (directBalance.rows.length === 0) {
+        const error = new Error('No existe un balance pendiente para este pago');
+        error.statusCode = 400;
+        throw error;
+    }
+
+    const currentAmount = Number(directBalance.rows[0].amount);
+    if (amount > currentAmount) {
+        const error = new Error('El pago no puede ser mayor al balance pendiente');
+        error.statusCode = 400;
+        throw error;
+    }
+
+    const remaining = roundToTwo(currentAmount - amount);
+
+    if (remaining === 0) {
+        await client.query('DELETE FROM balances WHERE id = $1', [directBalance.rows[0].id]);
+        return { remaining_amount: 0, cleared: true };
+    }
+
+    await client.query(
+        `UPDATE balances
+         SET amount = $1, updated_at = CURRENT_TIMESTAMP
+         WHERE id = $2`,
+        [remaining, directBalance.rows[0].id]
+    );
+
+    return { remaining_amount: remaining, cleared: false };
+};
+
 const createExpense = async (req, res) => {
     const client = await pool.connect();
 
@@ -259,7 +339,8 @@ const createExpense = async (req, res) => {
             group_id: groupId = null,
             participants,
             paid_by: paidBy = req.user.id,
-            currency = 'COP'
+            currency = 'COP',
+            split_type: splitType = 'equal'
         } = req.body;
 
         const totalAmount = Number(amount);
@@ -275,8 +356,17 @@ const createExpense = async (req, res) => {
         if (!Array.isArray(participants) || participants.length === 0) {
             return res.status(400).json({ error: 'Debes enviar al menos un participante' });
         }
+        if (!['equal', 'custom'].includes(splitType)) {
+            return res.status(400).json({ error: 'split_type debe ser equal o custom' });
+        }
 
-        const participantIds = [...new Set(participants)];
+        const participantIds = [
+            ...new Set(
+                splitType === 'custom'
+                    ? participants.map((participant) => participant.user_id)
+                    : participants
+            )
+        ];
         const involvedUserIds = [...new Set([...participantIds, paidBy])];
 
         await client.query('BEGIN');
@@ -326,18 +416,23 @@ const createExpense = async (req, res) => {
 
         const expenseResult = await client.query(
             `INSERT INTO expenses (group_id, paid_by, description, total_amount, currency, split_type)
-             VALUES ($1, $2, $3, $4, $5, 'equal')
+             VALUES ($1, $2, $3, $4, $5, $6)
              RETURNING id, group_id, paid_by, description, total_amount, currency, split_type, created_at`,
-            [groupId, paidBy, description.trim(), roundToTwo(totalAmount), currency]
+            [groupId, paidBy, description.trim(), roundToTwo(totalAmount), currency, splitType]
         );
 
-        const shares = buildEqualShares(totalAmount, participantIds.length);
+        const shares = splitType === 'custom'
+            ? buildCustomShares(totalAmount, participants)
+            : buildEqualShares(totalAmount, participantIds.length).map((share, index) => ({
+                user_id: participantIds[index],
+                share_amount: share
+            }));
         const participantRows = [];
         const generatedBalances = [];
 
-        for (let index = 0; index < participantIds.length; index += 1) {
-            const participantId = participantIds[index];
-            const share = shares[index];
+        for (let index = 0; index < shares.length; index += 1) {
+            const participantId = shares[index].user_id;
+            const share = shares[index].share_amount;
             const owedAmount = participantId === paidBy ? 0 : share;
 
             const participantResult = await client.query(
@@ -493,9 +588,161 @@ const getDashboard = async (req, res) => {
     }
 };
 
+const getExpenses = async (req, res) => {
+    try {
+        const { group_id: groupId } = req.query;
+        const params = [req.user.id];
+        let groupFilter = '';
+
+        if (groupId) {
+            params.push(groupId);
+            groupFilter = 'AND e.group_id = $2';
+        }
+
+        const result = await pool.query(
+            `SELECT
+                e.id,
+                e.group_id,
+                e.paid_by,
+                payer.name AS paid_by_name,
+                e.description,
+                e.total_amount,
+                e.currency,
+                e.split_type,
+                e.created_at
+             FROM expenses e
+             JOIN users payer ON payer.id = e.paid_by
+             WHERE (
+                e.paid_by = $1
+                OR EXISTS (
+                    SELECT 1
+                    FROM expense_participants ep
+                    WHERE ep.expense_id = e.id
+                      AND ep.user_id = $1
+                )
+             )
+             ${groupFilter}
+             ORDER BY e.created_at DESC`,
+            params
+        );
+
+        return res.json({ expenses: result.rows });
+    } catch (error) {
+        return res.status(500).json({ error: error.message });
+    }
+};
+
+const registerPayment = async (req, res) => {
+    const client = await pool.connect();
+
+    try {
+        const {
+            to_user: toUser,
+            amount,
+            group_id: groupId = null,
+            loan_id: loanId = null
+        } = req.body;
+
+        const paymentAmount = roundToTwo(Number(amount));
+
+        if (!toUser) {
+            return res.status(400).json({ error: 'El to_user es obligatorio' });
+        }
+
+        if (!Number.isFinite(paymentAmount) || paymentAmount <= 0) {
+            return res.status(400).json({ error: 'El monto del pago debe ser mayor a 0' });
+        }
+
+        if (toUser === req.user.id) {
+            return res.status(400).json({ error: 'No puedes pagarte a ti mismo' });
+        }
+
+        await client.query('BEGIN');
+
+        const usersResult = await client.query(
+            `SELECT id
+             FROM users
+             WHERE id = ANY($1::uuid[])`,
+            [[req.user.id, toUser]]
+        );
+
+        if (usersResult.rows.length !== 2) {
+            await client.query('ROLLBACK');
+            return res.status(404).json({ error: 'Uno o ambos usuarios no existen' });
+        }
+
+        if (groupId) {
+            const members = await validateGroupMembers(client, groupId, [req.user.id, toUser]);
+            if (members.size !== 2) {
+                await client.query('ROLLBACK');
+                return res.status(403).json({
+                    error: 'Ambos usuarios deben ser miembros activos del grupo'
+                });
+            }
+        }
+
+        const settlement = await settleBalance(client, {
+            groupId,
+            debtorId: req.user.id,
+            creditorId: toUser,
+            amount: paymentAmount
+        });
+
+        const paymentResult = await client.query(
+            `INSERT INTO payments (loan_id, from_user, to_user, amount)
+             VALUES ($1, $2, $3, $4)
+             RETURNING id, loan_id, from_user, to_user, amount, created_at`,
+            [loanId, req.user.id, toUser, paymentAmount]
+        );
+
+        await client.query('COMMIT');
+
+        return res.status(201).json({
+            message: 'Pago registrado correctamente',
+            payment: paymentResult.rows[0],
+            balance_status: settlement
+        });
+    } catch (error) {
+        await client.query('ROLLBACK');
+        return res.status(error.statusCode || 500).json({ error: error.message });
+    } finally {
+        client.release();
+    }
+};
+
+const getMyPayments = async (req, res) => {
+    try {
+        const result = await pool.query(
+            `SELECT
+                p.id,
+                p.loan_id,
+                p.from_user,
+                sender.name AS from_user_name,
+                p.to_user,
+                receiver.name AS to_user_name,
+                p.amount,
+                p.created_at
+             FROM payments p
+             JOIN users sender ON sender.id = p.from_user
+             JOIN users receiver ON receiver.id = p.to_user
+             WHERE p.from_user = $1
+                OR p.to_user = $1
+             ORDER BY p.created_at DESC`,
+            [req.user.id]
+        );
+
+        return res.json({ payments: result.rows });
+    } catch (error) {
+        return res.status(500).json({ error: error.message });
+    }
+};
+
 module.exports = {
     createExpense,
+    getExpenses,
     getMyBalances,
     getOptimizedPayments,
-    getDashboard
+    getDashboard,
+    registerPayment,
+    getMyPayments
 };

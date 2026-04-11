@@ -1,16 +1,87 @@
 const pool = require('../db/connection');
 
+const MAX_GROUP_MEMBERS_LIMIT = 50;
+
+const getGroupCapacity = async (client, groupId) => {
+    const result = await client.query(
+        `SELECT
+            g.id,
+            g.name,
+            g.is_private,
+            g.max_members,
+            COUNT(gm.id) FILTER (WHERE gm.left_at IS NULL) AS active_members
+         FROM groups g
+         LEFT JOIN group_members gm ON gm.group_id = g.id
+         WHERE g.id = $1
+         GROUP BY g.id`,
+        [groupId]
+    );
+
+    return result.rows[0] || null;
+};
+
+const ensureGroupCapacity = async (client, groupId, slotsNeeded = 1) => {
+    const group = await getGroupCapacity(client, groupId);
+
+    if (!group) {
+        const error = new Error('El grupo no existe');
+        error.statusCode = 404;
+        throw error;
+    }
+
+    if (Number(group.active_members) + slotsNeeded > Number(group.max_members)) {
+        const error = new Error('El grupo ya alcanzo su capacidad maxima');
+        error.statusCode = 409;
+        throw error;
+    }
+
+    return group;
+};
+
+const ensureActiveMembership = async (client, groupId, userId) => {
+    const membershipResult = await client.query(
+        `SELECT role
+         FROM group_members
+         WHERE group_id = $1
+           AND user_id = $2
+           AND left_at IS NULL
+         LIMIT 1`,
+        [groupId, userId]
+    );
+
+    return membershipResult.rows[0] || null;
+};
+
 const createGroup = async (req, res) => {
     const client = await pool.connect();
 
     try {
-        const { name, is_private: isPrivate = false, members = [] } = req.body;
+        const {
+            name,
+            is_private: isPrivate = false,
+            members = [],
+            max_members: maxMembers = 10
+        } = req.body;
+
+        const normalizedMaxMembers = Number(maxMembers);
 
         if (!name || !name.trim()) {
             return res.status(400).json({ error: 'El nombre del grupo es obligatorio' });
         }
 
+        if (!Number.isInteger(normalizedMaxMembers) || normalizedMaxMembers < 2 || normalizedMaxMembers > MAX_GROUP_MEMBERS_LIMIT) {
+            return res.status(400).json({
+                error: `max_members debe ser un numero entero entre 2 y ${MAX_GROUP_MEMBERS_LIMIT}`
+            });
+        }
+
         const memberIds = [...new Set([req.user.id, ...members])];
+
+        if (memberIds.length > normalizedMaxMembers) {
+            return res.status(400).json({
+                error: 'La cantidad inicial de miembros supera el cupo maximo del grupo'
+            });
+        }
 
         await client.query('BEGIN');
 
@@ -40,10 +111,10 @@ const createGroup = async (req, res) => {
         }
 
         const groupResult = await client.query(
-            `INSERT INTO groups (name, is_private, created_by)
-             VALUES ($1, $2, $3)
-             RETURNING id, name, is_private, created_by, created_at`,
-            [name.trim(), isPrivate, req.user.id]
+            `INSERT INTO groups (name, is_private, created_by, max_members)
+             VALUES ($1, $2, $3, $4)
+             RETURNING id, name, is_private, created_by, max_members, created_at`,
+            [name.trim(), isPrivate, req.user.id, normalizedMaxMembers]
         );
 
         const createdMembers = [];
@@ -102,8 +173,7 @@ const addGroupMember = async (req, res) => {
             return res.status(403).json({ error: 'No perteneces a este grupo' });
         }
 
-        const requesterRole = membershipResult.rows[0].role;
-        if (!['owner', 'admin'].includes(requesterRole)) {
+        if (!['owner', 'admin'].includes(membershipResult.rows[0].role)) {
             await client.query('ROLLBACK');
             return res.status(403).json({
                 error: 'Solo un owner o admin puede agregar miembros'
@@ -141,6 +211,8 @@ const addGroupMember = async (req, res) => {
             await client.query('ROLLBACK');
             return res.status(409).json({ error: 'El usuario ya pertenece al grupo' });
         }
+
+        await ensureGroupCapacity(client, groupId);
 
         const inactiveMemberResult = await client.query(
             `SELECT id
@@ -181,7 +253,7 @@ const addGroupMember = async (req, res) => {
         });
     } catch (error) {
         await client.query('ROLLBACK');
-        return res.status(500).json({ error: error.message });
+        return res.status(error.statusCode || 500).json({ error: error.message });
     } finally {
         client.release();
     }
@@ -194,6 +266,7 @@ const getMyGroups = async (req, res) => {
                 g.id,
                 g.name,
                 g.is_private,
+                g.max_members,
                 g.created_by,
                 g.created_at,
                 gm.role,
@@ -233,7 +306,7 @@ const getGroupDetails = async (req, res) => {
         }
 
         const groupResult = await pool.query(
-            `SELECT id, name, is_private, created_by, created_at
+            `SELECT id, name, is_private, max_members, created_by, created_at
              FROM groups
              WHERE id = $1`,
             [groupId]
@@ -259,6 +332,122 @@ const getGroupDetails = async (req, res) => {
         });
     } catch (error) {
         return res.status(500).json({ error: error.message });
+    }
+};
+
+const getPublicGroups = async (req, res) => {
+    try {
+        const result = await pool.query(
+            `SELECT
+                g.id,
+                g.name,
+                g.is_private,
+                g.max_members,
+                g.created_by,
+                creator.name AS created_by_name,
+                g.created_at,
+                COUNT(gm.id) FILTER (WHERE gm.left_at IS NULL) AS total_members,
+                EXISTS (
+                    SELECT 1
+                    FROM group_members own_member
+                    WHERE own_member.group_id = g.id
+                      AND own_member.user_id = $1
+                      AND own_member.left_at IS NULL
+                ) AS joined
+             FROM groups g
+             JOIN users creator ON creator.id = g.created_by
+             LEFT JOIN group_members gm ON gm.group_id = g.id
+             WHERE g.is_private = FALSE
+             GROUP BY g.id, creator.name
+             ORDER BY g.created_at DESC`,
+            [req.user.id]
+        );
+
+        return res.json({ groups: result.rows });
+    } catch (error) {
+        return res.status(500).json({ error: error.message });
+    }
+};
+
+const joinPublicGroup = async (req, res) => {
+    const client = await pool.connect();
+
+    try {
+        const { groupId } = req.params;
+
+        await client.query('BEGIN');
+
+        const group = await getGroupCapacity(client, groupId);
+
+        if (!group) {
+            await client.query('ROLLBACK');
+            return res.status(404).json({ error: 'El grupo no existe' });
+        }
+
+        if (group.is_private) {
+            await client.query('ROLLBACK');
+            return res.status(403).json({ error: 'Solo puedes unirte a grupos publicos' });
+        }
+
+        const activeMemberResult = await client.query(
+            `SELECT id
+             FROM group_members
+             WHERE group_id = $1
+               AND user_id = $2
+               AND left_at IS NULL
+             LIMIT 1`,
+            [groupId, req.user.id]
+        );
+
+        if (activeMemberResult.rows.length > 0) {
+            await client.query('ROLLBACK');
+            return res.status(409).json({ error: 'Ya perteneces a este grupo' });
+        }
+
+        await ensureGroupCapacity(client, groupId);
+
+        const inactiveMemberResult = await client.query(
+            `SELECT id
+             FROM group_members
+             WHERE group_id = $1
+               AND user_id = $2
+               AND left_at IS NOT NULL
+             ORDER BY joined_at DESC
+             LIMIT 1`,
+            [groupId, req.user.id]
+        );
+
+        let memberResult;
+        if (inactiveMemberResult.rows.length > 0) {
+            memberResult = await client.query(
+                `UPDATE group_members
+                 SET left_at = NULL,
+                     joined_at = CURRENT_TIMESTAMP,
+                     role = 'member'
+                 WHERE id = $1
+                 RETURNING id, user_id, group_id, role, joined_at, left_at`,
+                [inactiveMemberResult.rows[0].id]
+            );
+        } else {
+            memberResult = await client.query(
+                `INSERT INTO group_members (user_id, group_id, role)
+                 VALUES ($1, $2, 'member')
+                 RETURNING id, user_id, group_id, role, joined_at, left_at`,
+                [req.user.id, groupId]
+            );
+        }
+
+        await client.query('COMMIT');
+
+        return res.status(201).json({
+            message: 'Te uniste al grupo correctamente',
+            member: memberResult.rows[0]
+        });
+    } catch (error) {
+        await client.query('ROLLBACK');
+        return res.status(error.statusCode || 500).json({ error: error.message });
+    } finally {
+        client.release();
     }
 };
 
@@ -415,6 +604,8 @@ const respondToInvitation = async (req, res) => {
 
         let member = null;
         if (action === 'accept') {
+            await ensureGroupCapacity(client, invitation.group_id);
+
             const activeMemberResult = await client.query(
                 `SELECT id
                  FROM group_members
@@ -471,7 +662,7 @@ const respondToInvitation = async (req, res) => {
         });
     } catch (error) {
         await client.query('ROLLBACK');
-        return res.status(500).json({ error: error.message });
+        return res.status(error.statusCode || 500).json({ error: error.message });
     } finally {
         client.release();
     }
@@ -502,12 +693,174 @@ const getMyInvitations = async (req, res) => {
     }
 };
 
+const leaveGroup = async (req, res) => {
+    const client = await pool.connect();
+
+    try {
+        const { groupId } = req.params;
+
+        await client.query('BEGIN');
+
+        const membershipResult = await client.query(
+            `SELECT id, role
+             FROM group_members
+             WHERE group_id = $1
+               AND user_id = $2
+               AND left_at IS NULL
+             LIMIT 1`,
+            [groupId, req.user.id]
+        );
+
+        if (membershipResult.rows.length === 0) {
+            await client.query('ROLLBACK');
+            return res.status(403).json({ error: 'No perteneces a este grupo' });
+        }
+
+        const groupResult = await client.query(
+            `SELECT id
+             FROM groups
+             WHERE id = $1
+             LIMIT 1`,
+            [groupId]
+        );
+
+        if (groupResult.rows.length === 0) {
+            await client.query('ROLLBACK');
+            return res.status(404).json({ error: 'El grupo no existe' });
+        }
+
+        let newOwner = null;
+
+        if (membershipResult.rows[0].role === 'owner') {
+            const replacementResult = await client.query(
+                `SELECT gm.user_id, u.name
+                 FROM group_members gm
+                 JOIN users u ON u.id = gm.user_id
+                 WHERE gm.group_id = $1
+                   AND gm.user_id <> $2
+                   AND gm.left_at IS NULL
+                 ORDER BY gm.joined_at ASC
+                 LIMIT 1`,
+                [groupId, req.user.id]
+            );
+
+            if (replacementResult.rows.length > 0) {
+                newOwner = replacementResult.rows[0];
+
+                await client.query(
+                    `UPDATE group_members
+                     SET role = 'owner'
+                     WHERE group_id = $1
+                       AND user_id = $2
+                       AND left_at IS NULL`,
+                    [groupId, newOwner.user_id]
+                );
+
+                await client.query(
+                    `UPDATE groups
+                     SET created_by = $1
+                     WHERE id = $2`,
+                    [newOwner.user_id, groupId]
+                );
+            }
+        }
+
+        await client.query(
+            `UPDATE group_members
+             SET left_at = CURRENT_TIMESTAMP
+             WHERE id = $1`,
+            [membershipResult.rows[0].id]
+        );
+
+        await client.query('COMMIT');
+
+        return res.json({
+            message: 'Saliste del grupo correctamente',
+            new_owner: newOwner
+        });
+    } catch (error) {
+        await client.query('ROLLBACK');
+        return res.status(error.statusCode || 500).json({ error: error.message });
+    } finally {
+        client.release();
+    }
+};
+
+const getGroupMessages = async (req, res) => {
+    try {
+        const { groupId } = req.params;
+
+        const membership = await ensureActiveMembership(pool, groupId, req.user.id);
+        if (!membership) {
+            return res.status(403).json({ error: 'No perteneces a este grupo' });
+        }
+
+        const result = await pool.query(
+            `SELECT
+                gm.id,
+                gm.group_id,
+                gm.sender_id,
+                u.name AS sender_name,
+                gm.message,
+                gm.created_at
+             FROM group_messages gm
+             JOIN users u ON u.id = gm.sender_id
+             WHERE gm.group_id = $1
+             ORDER BY gm.created_at ASC`,
+            [groupId]
+        );
+
+        return res.json({ messages: result.rows });
+    } catch (error) {
+        return res.status(500).json({ error: error.message });
+    }
+};
+
+const sendGroupMessage = async (req, res) => {
+    const client = await pool.connect();
+
+    try {
+        const { groupId } = req.params;
+        const { message } = req.body;
+
+        if (!message || !message.trim()) {
+            return res.status(400).json({ error: 'El mensaje es obligatorio' });
+        }
+
+        const membership = await ensureActiveMembership(client, groupId, req.user.id);
+        if (!membership) {
+            return res.status(403).json({ error: 'No perteneces a este grupo' });
+        }
+
+        const result = await client.query(
+            `INSERT INTO group_messages (group_id, sender_id, message)
+             VALUES ($1, $2, $3)
+             RETURNING id, group_id, sender_id, message, created_at`,
+            [groupId, req.user.id, message.trim()]
+        );
+
+        return res.status(201).json({
+            message: 'Mensaje enviado correctamente',
+            group_message: result.rows[0]
+        });
+    } catch (error) {
+        return res.status(500).json({ error: error.message });
+    } finally {
+        client.release();
+    }
+};
+
 module.exports = {
     createGroup,
     addGroupMember,
     getMyGroups,
+    getPublicGroups,
+    joinPublicGroup,
     getGroupDetails,
     inviteToGroup,
     respondToInvitation,
-    getMyInvitations
+    getMyInvitations,
+    leaveGroup,
+    getGroupMessages,
+    sendGroupMessage
 };

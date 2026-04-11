@@ -1,11 +1,12 @@
+const env = require('../config/env');
 const { Pool } = require('pg');
 
 const pool = new Pool({
-    user: 'postgres',
-    host: 'localhost',
-    database: 'nequi_coop',
-    password: '1234',
-    port: 5432,
+    user: env.db.user,
+    host: env.db.host,
+    database: env.db.database,
+    password: env.db.password,
+    port: env.db.port,
 });
 
 module.exports = pool;

@@ -1,4 +1,5 @@
 const pool = require('../db/connection');
+const env = require('../config/env');
 const bcrypt = require('bcrypt');
 const jwt = require('jsonwebtoken');
 
@@ -45,8 +46,8 @@ const login = async (req, res) => {
 
         const token = jwt.sign(
             { id: user.id, email: user.email },
-            'secreto123',
-            { expiresIn: '1h' }
+            env.jwtSecret,
+            { expiresIn: env.jwtExpiresIn }
         );
 
         res.json({
