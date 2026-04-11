@@ -729,6 +729,39 @@ const leaveGroup = async (req, res) => {
             return res.status(404).json({ error: 'El grupo no existe' });
         }
 
+        const pendingDebtResult = await client.query(
+            `SELECT 1
+             FROM balances
+             WHERE group_id = $1
+               AND debtor_id = $2
+             LIMIT 1`,
+            [groupId, req.user.id]
+        );
+
+        if (pendingDebtResult.rows.length > 0) {
+            await client.query('ROLLBACK');
+            return res.status(409).json({
+                error: 'No puedes abandonar el grupo hasta pagar lo que debes'
+            });
+        }
+
+        const activeLoanDebtResult = await client.query(
+            `SELECT 1
+             FROM loans
+             WHERE group_id = $1
+               AND borrower_id = $2
+               AND status = 'active'
+             LIMIT 1`,
+            [groupId, req.user.id]
+        );
+
+        if (activeLoanDebtResult.rows.length > 0) {
+            await client.query('ROLLBACK');
+            return res.status(409).json({
+                error: 'No puedes abandonar el grupo hasta pagar lo que debes'
+            });
+        }
+
         let newOwner = null;
 
         if (membershipResult.rows[0].role === 'owner') {

@@ -97,6 +97,8 @@ const invitationStatusLabels = { pending: 'Pendiente', accepted: 'Aceptada', rej
 const MIN_GROUP_LOAN_AMOUNT = 1000;
 const GROUP_LOAN_STEP = 50;
 const MAX_GROUP_LOAN_TERM_DAYS = 15;
+let groupMessagesPollId = null;
+let messageTimeoutId = null;
 
 function setMessage(value, visible = true) {
     const content = typeof value === 'string'
@@ -128,8 +130,30 @@ function setMessage(value, visible = true) {
 
     if (!els.messageBox) return;
 
-    els.messageBox.textContent = content;
-    els.messageBox.classList.toggle('hidden', !visible || !content || !looksLikeError);
+    if (messageTimeoutId) {
+        clearTimeout(messageTimeoutId);
+        messageTimeoutId = null;
+    }
+
+    if (!visible || !content) {
+        els.messageBox.innerHTML = '';
+        return;
+    }
+
+    const toastType = looksLikeError ? 'toast-error' : 'toast-success';
+    els.messageBox.innerHTML = `
+        <div class="toast-message ${toastType}" role="status">
+            <span>${content}</span>
+            <button type="button" class="toast-close" aria-label="Cerrar notificacion">x</button>
+        </div>
+    `;
+
+    const closeButton = els.messageBox.querySelector('.toast-close');
+    closeButton?.addEventListener('click', clearMessage);
+
+    messageTimeoutId = setTimeout(() => {
+        clearMessage();
+    }, looksLikeError ? 6500 : 4200);
 }
 
 function setErrorMessage(value) {
@@ -157,6 +181,33 @@ function setSessionStatus() {
 function setViewMode(isAuthenticated) {
     els.authScreen.classList.toggle('hidden', isAuthenticated);
     els.appShell.classList.toggle('hidden', !isAuthenticated);
+}
+
+function stopGroupMessagesPolling() {
+    if (!groupMessagesPollId) return;
+    clearInterval(groupMessagesPollId);
+    groupMessagesPollId = null;
+}
+
+function startGroupMessagesPolling() {
+    stopGroupMessagesPolling();
+
+    const groupId = state.selectedGroup?.group?.id;
+    if (!groupId) return;
+
+    groupMessagesPollId = setInterval(async () => {
+        if (state.selectedGroup?.group?.id !== groupId) {
+            stopGroupMessagesPolling();
+            return;
+        }
+
+        try {
+            await loadGroupMessages(groupId);
+            renderGroupMessages();
+        } catch {
+            stopGroupMessagesPolling();
+        }
+    }, 4000);
 }
 
 function setActiveView(view) {
@@ -197,6 +248,10 @@ function renderMetrics() {
     const availableBalanceHint = $('available-balance-hint');
     if (availableBalanceHint) {
         availableBalanceHint.textContent = money.format(Number(state.dashboard.available_balance || 0));
+    }
+    const paymentAmountInput = $('payment-amount');
+    if (paymentAmountInput) {
+        paymentAmountInput.max = String(Number(state.dashboard.available_balance || 0));
     }
 }
 
@@ -403,25 +458,11 @@ function renderGroupInvitations() {
 }
 
 function renderSocialUsers() {
-    const pendingSentMap = new Map(
-        state.friendRequests.sent
-            .filter((request) => request.status === 'pending')
-            .map((request) => [request.receiver_id, request.id])
-    );
-
     renderList(els.usersList, state.socialUsers, (user) => `
         <div class="row-card">
             <div>
                 <strong>${user.name}</strong>
                 <p>${user.email}</p>
-            </div>
-            <div class="card-actions">
-                ${user.is_friend
-                    ? '<span class="chip">Amigo</span>'
-                    : pendingSentMap.has(user.id)
-                        ? `<button type="button" class="ghost" data-action="cancel-friend-request" data-request-id="${pendingSentMap.get(user.id)}">Cancelar solicitud</button>`
-                        : `<button type="button" data-action="send-friend-request" data-user-id="${user.id}">Agregar amigo</button>`
-                }
             </div>
         </div>
     `, 'No se encontraron usuarios.');
@@ -621,7 +662,10 @@ async function loadAll(searchUsers = '') {
         } catch {
             state.selectedGroup = null;
             state.groupMessages = [];
+            stopGroupMessagesPolling();
         }
+    } else {
+        stopGroupMessagesPolling();
     }
 
     renderAll();
@@ -779,12 +823,23 @@ async function handleCreateExpense(event) {
 async function handleCreatePayment(event) {
     event.preventDefault();
     try {
+        const paymentAmount = Number($('payment-amount').value);
+        const availableBalance = Number(state.dashboard.available_balance || 0);
+
+        if (!Number.isFinite(paymentAmount) || paymentAmount <= 0) {
+            throw new Error('Debes ingresar un monto de pago valido');
+        }
+
+        if (paymentAmount > availableBalance) {
+            throw new Error('No puedes enviar mas dinero del que tienes disponible en tu cuenta');
+        }
+
         await api('/api/payments', {
             method: 'POST',
             body: JSON.stringify({
                 group_id: els.paymentGroup.value || null,
                 to_user: els.paymentToUser.value,
-                amount: Number($('payment-amount').value)
+                amount: paymentAmount
             })
         });
         els.paymentForm.reset();
@@ -862,11 +917,8 @@ async function handleCreateLoan(event) {
 
 async function handleJoinPublicGroup(groupId) {
     await api(`/api/groups/${groupId}/join`, { method: 'POST' });
-    await Promise.all([loadGroups(), loadPublicGroups(), loadDashboard()]);
-    renderGroups();
-    renderPublicGroups();
-    renderMetrics();
-    updateGroupSelectors();
+    await loadAll();
+    await handleOpenGroupDetail(groupId);
     setMessage('Te uniste al grupo correctamente.');
 }
 
@@ -879,6 +931,7 @@ async function handleOpenGroupDetail(groupId) {
     renderGroupDetail();
     renderGroupLoans();
     renderGroupMessages();
+    startGroupMessagesPolling();
     els.groupDetailCard.scrollIntoView({ behavior: 'smooth', block: 'start' });
 }
 
@@ -887,6 +940,7 @@ async function handleLeaveGroup(groupId) {
     state.selectedGroup = null;
     state.groupMessages = [];
     state.showGroupMembers = false;
+    stopGroupMessagesPolling();
     await Promise.all([loadGroups(), loadPublicGroups(), loadDashboard()]);
     renderGroups();
     renderSidebarGroups();
@@ -980,13 +1034,15 @@ async function handleSendGroupMessage(event) {
         els.groupLoanForm?.addEventListener('submit', handleCreateLoan);
     els.groupMessageForm?.addEventListener('submit', handleSendGroupMessage);
 
-    els.logoutBtn?.addEventListener('click', () => {
-        state.token = '';
-        state.user = null;
-        state.selectedGroup = null;
-        localStorage.removeItem('splitwise_token');
-        setViewMode(false);
-        setSessionStatus();
+      els.logoutBtn?.addEventListener('click', () => {
+          state.token = '';
+          state.user = null;
+          state.selectedGroup = null;
+          state.groupMessages = [];
+          stopGroupMessagesPolling();
+          localStorage.removeItem('splitwise_token');
+          setViewMode(false);
+          setSessionStatus();
         setMessage('Sesion cerrada.');
     });
 
@@ -995,12 +1051,15 @@ async function handleSendGroupMessage(event) {
     els.showCreateGroupBtn?.addEventListener('click', showCreateGroupCard);
     els.hideCreateGroupBtn?.addEventListener('click', hideCreateGroupCard);
     els.showGroupLoanFormBtn?.addEventListener('click', () => openGroupLoanForm());
-    els.hideGroupDetailBtn?.addEventListener('click', () => {
-        state.selectedGroup = null;
-        state.showGroupMembers = false;
-        renderSidebarGroups();
-        renderGroupDetail();
-    });
+      els.hideGroupDetailBtn?.addEventListener('click', () => {
+          state.selectedGroup = null;
+          state.showGroupMembers = false;
+          state.groupMessages = [];
+          stopGroupMessagesPolling();
+          renderSidebarGroups();
+          renderGroupDetail();
+          renderGroupMessages();
+      });
     els.toggleGroupMembersBtn?.addEventListener('click', () => {
         state.showGroupMembers = !state.showGroupMembers;
         renderGroupDetail();
@@ -1036,6 +1095,17 @@ async function handleSendGroupMessage(event) {
             renderSocialUsers();
             setActiveView('usuarios');
             setMessage(`Busqueda actualizada para "${els.userSearch.value || 'todos'}".`);
+        } catch (error) {
+            setMessage(error.message);
+        }
+    });
+
+    els.userSearch?.addEventListener('input', async (event) => {
+        if (event.target.value.trim()) return;
+
+        try {
+            await loadSocialUsers('');
+            renderSocialUsers();
         } catch (error) {
             setMessage(error.message);
         }
