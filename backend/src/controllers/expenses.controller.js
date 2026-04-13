@@ -892,11 +892,6 @@ const registerPayment = async (req, res) => {
             return res.status(403).json({ error: 'La cuenta administradora no puede participar en pagos manuales' });
         }
 
-        if (senderState.is_banned || receiverState.is_banned) {
-            await client.query('ROLLBACK');
-            return res.status(403).json({ error: 'No se pueden registrar pagos con usuarios baneados' });
-        }
-
         if (groupId) {
             const members = await validateGroupMembers(client, groupId, [req.user.id, toUser]);
             if (members.size !== 2) {
