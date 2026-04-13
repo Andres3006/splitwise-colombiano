@@ -75,6 +75,15 @@ button.ghost,
     text-decoration: none;
 }
 
+button.danger-button {
+    border-color: rgba(255, 93, 118, 0.55);
+    color: #ffd8de;
+}
+
+button.danger-button:hover {
+    box-shadow: 0 0 0 1px rgba(255, 93, 118, 0.24);
+}
+
 input,
 select,
 textarea {

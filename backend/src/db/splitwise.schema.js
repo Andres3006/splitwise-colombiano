@@ -121,6 +121,12 @@ const ensureSplitwiseSchema = async () => {
         ALTER TABLE users
         ADD COLUMN IF NOT EXISTS wallet_balance NUMERIC(12,2) NOT NULL DEFAULT 0;
 
+        ALTER TABLE users
+        ADD COLUMN IF NOT EXISTS blocked_until TIMESTAMP NULL;
+
+        ALTER TABLE users
+        ADD COLUMN IF NOT EXISTS block_reason TEXT;
+
         ALTER TABLE groups
         DROP CONSTRAINT IF EXISTS groups_max_members_check;
 

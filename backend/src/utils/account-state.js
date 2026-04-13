@@ -2,6 +2,12 @@ const pool = require('../db/connection');
 
 const roundToTwo = (value) => Number(Number(value).toFixed(2));
 const ADMIN_EMAIL = 'admin@test.com';
+const blockedUntilLabel = (value) => {
+    if (!value) return 'una fecha pendiente';
+    const date = new Date(value);
+    if (Number.isNaN(date.getTime())) return 'una fecha pendiente';
+    return date.toLocaleString('es-CO');
+};
 
 const isAdminAccount = (user) => (
     String(user?.role || '').toLowerCase() === 'admin'
@@ -11,7 +17,7 @@ const isAdminAccount = (user) => (
 const getUserAccountState = async (client, userId) => {
     const executor = client || pool;
     const userResult = await executor.query(
-        `SELECT id, name, email, role, is_banned
+        `SELECT id, name, email, role, is_banned, blocked_until, block_reason
          FROM users
          WHERE id = $1
          LIMIT 1`,
@@ -44,9 +50,13 @@ const getUserAccountState = async (client, userId) => {
         [userId]
     );
 
+    const blockedUntil = userResult.rows[0].blocked_until ? new Date(userResult.rows[0].blocked_until) : null;
+    const isTemporarilyBlocked = Boolean(blockedUntil && blockedUntil.getTime() > Date.now());
+
     return {
         ...userResult.rows[0],
         is_admin_account: isAdminAccount(userResult.rows[0]),
+        is_temporarily_blocked: isTemporarilyBlocked,
         has_overdue_loans: overdueLoansResult.rows.length > 0,
         overdue_loans: overdueLoansResult.rows.map((loan) => ({
             ...loan,
@@ -71,6 +81,14 @@ const assertUserCanUseRestrictedFeatures = async (client, userId, options = {}) 
 
     if (accountState.is_banned) {
         const error = new Error(`${errorPrefix}: la cuenta esta baneada`);
+        error.statusCode = 403;
+        throw error;
+    }
+
+    if (accountState.is_temporarily_blocked) {
+        const error = new Error(
+            `${errorPrefix}: la cuenta esta bloqueada temporalmente hasta ${blockedUntilLabel(accountState.blocked_until)}`
+        );
         error.statusCode = 403;
         throw error;
     }

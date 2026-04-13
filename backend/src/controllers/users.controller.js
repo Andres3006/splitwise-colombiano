@@ -1,6 +1,19 @@
 const pool = require('../db/connection');
+const { getUserAccountState, isAdminAccount } = require('../utils/account-state');
 const MIN_WALLET_DEPOSIT = 1000;
 const MIN_WALLET_WITHDRAWAL = 1000;
+
+const assertAdminRequest = async (req) => {
+    const accountState = await getUserAccountState(pool, req.user.id);
+
+    if (!isAdminAccount(accountState)) {
+        const error = new Error('Solo la cuenta administradora puede usar esta opcion');
+        error.statusCode = 403;
+        throw error;
+    }
+
+    return accountState;
+};
 
 const getUsers = async (req, res) => {
     try {
@@ -12,6 +25,8 @@ const getUsers = async (req, res) => {
                 u.created_at,
                 u.is_banned,
                 u.role,
+                u.blocked_until,
+                u.block_reason,
                 EXISTS (
                     SELECT 1
                     FROM loans l
@@ -21,7 +36,8 @@ const getUsers = async (req, res) => {
                       AND l.due_date < CURRENT_TIMESTAMP
                     GROUP BY l.id, l.total_amount
                     HAVING GREATEST(l.total_amount - COALESCE(SUM(p.amount), 0), 0) > 0
-                ) AS has_overdue_loans
+                ) AS has_overdue_loans,
+                (u.blocked_until IS NOT NULL AND u.blocked_until > CURRENT_TIMESTAMP) AS is_temporarily_blocked
              FROM users u
              ORDER BY u.name ASC`
         );
@@ -29,6 +45,179 @@ const getUsers = async (req, res) => {
         return res.json({ users: result.rows });
     } catch (error) {
         return res.status(500).json({ error: error.message });
+    }
+};
+
+const getAdminGroups = async (req, res) => {
+    try {
+        await assertAdminRequest(req);
+
+        const result = await pool.query(
+            `SELECT
+                g.id,
+                g.name,
+                g.description,
+                g.is_private,
+                g.max_members,
+                g.created_at,
+                g.created_by,
+                creator.name AS creator_name,
+                COUNT(DISTINCT gm.id) FILTER (WHERE gm.left_at IS NULL) AS total_members,
+                COUNT(DISTINCT b.id) AS balances_count,
+                COUNT(DISTINCT l.id) FILTER (WHERE l.status = 'active') AS active_loans_count
+             FROM groups g
+             LEFT JOIN users creator ON creator.id = g.created_by
+             LEFT JOIN group_members gm ON gm.group_id = g.id
+             LEFT JOIN balances b ON b.group_id = g.id
+             LEFT JOIN loans l ON l.group_id = g.id
+             GROUP BY g.id, creator.name
+             ORDER BY g.created_at DESC`
+        );
+
+        return res.json({ groups: result.rows });
+    } catch (error) {
+        return res.status(error.statusCode || 500).json({ error: error.message });
+    }
+};
+
+const moderateUser = async (req, res) => {
+    const client = await pool.connect();
+
+    try {
+        const { userId } = req.params;
+        const { action, reason = '', duration_days: durationDays = 7 } = req.body;
+
+        await assertAdminRequest(req);
+
+        if (!['ban', 'unban', 'block', 'unblock'].includes(action)) {
+            return res.status(400).json({ error: 'La accion no es valida' });
+        }
+
+        await client.query('BEGIN');
+
+        const userResult = await client.query(
+            `SELECT id, name, email, role, is_banned, blocked_until
+             FROM users
+             WHERE id = $1
+             LIMIT 1`,
+            [userId]
+        );
+
+        if (userResult.rows.length === 0) {
+            await client.query('ROLLBACK');
+            return res.status(404).json({ error: 'El usuario no existe' });
+        }
+
+        if (isAdminAccount(userResult.rows[0])) {
+            await client.query('ROLLBACK');
+            return res.status(403).json({ error: 'No puedes moderar la cuenta administradora' });
+        }
+
+        let updatedUser;
+
+        if (action === 'ban') {
+            updatedUser = await client.query(
+                `UPDATE users
+                 SET is_banned = TRUE,
+                     blocked_until = NULL,
+                     block_reason = $2
+                 WHERE id = $1
+                 RETURNING id, name, email, is_banned, blocked_until, block_reason, role`,
+                [userId, reason.trim() || 'Baneo aplicado por administrador']
+            );
+        }
+
+        if (action === 'unban') {
+            updatedUser = await client.query(
+                `UPDATE users
+                 SET is_banned = FALSE,
+                     block_reason = CASE
+                         WHEN blocked_until IS NOT NULL AND blocked_until > CURRENT_TIMESTAMP THEN block_reason
+                         ELSE NULL
+                     END
+                 WHERE id = $1
+                 RETURNING id, name, email, is_banned, blocked_until, block_reason, role`,
+                [userId]
+            );
+        }
+
+        if (action === 'block') {
+            const normalizedDays = Math.min(Math.max(Number(durationDays) || 7, 1), 365);
+            updatedUser = await client.query(
+                `UPDATE users
+                 SET is_banned = FALSE,
+                     blocked_until = CURRENT_TIMESTAMP + ($2 * INTERVAL '1 day'),
+                     block_reason = $3
+                 WHERE id = $1
+                 RETURNING id, name, email, is_banned, blocked_until, block_reason, role`,
+                [userId, normalizedDays, reason.trim() || `Bloqueo temporal de ${normalizedDays} dias aplicado por administrador`]
+            );
+        }
+
+        if (action === 'unblock') {
+            updatedUser = await client.query(
+                `UPDATE users
+                 SET blocked_until = NULL,
+                     block_reason = NULL
+                 WHERE id = $1
+                 RETURNING id, name, email, is_banned, blocked_until, block_reason, role`,
+                [userId]
+            );
+        }
+
+        await client.query('COMMIT');
+
+        return res.json({
+            message: 'Usuario actualizado correctamente',
+            user: updatedUser.rows[0]
+        });
+    } catch (error) {
+        await client.query('ROLLBACK');
+        return res.status(error.statusCode || 500).json({ error: error.message });
+    } finally {
+        client.release();
+    }
+};
+
+const deleteGroupAsAdmin = async (req, res) => {
+    const client = await pool.connect();
+
+    try {
+        const { groupId } = req.params;
+
+        await assertAdminRequest(req);
+        await client.query('BEGIN');
+
+        const groupResult = await client.query(
+            `SELECT id, name
+             FROM groups
+             WHERE id = $1
+             LIMIT 1`,
+            [groupId]
+        );
+
+        if (groupResult.rows.length === 0) {
+            await client.query('ROLLBACK');
+            return res.status(404).json({ error: 'El grupo no existe' });
+        }
+
+        await client.query(
+            `DELETE FROM groups
+             WHERE id = $1`,
+            [groupId]
+        );
+
+        await client.query('COMMIT');
+
+        return res.json({
+            message: 'Grupo eliminado por administracion correctamente',
+            deleted_group_id: groupId
+        });
+    } catch (error) {
+        await client.query('ROLLBACK');
+        return res.status(error.statusCode || 500).json({ error: error.message });
+    } finally {
+        client.release();
     }
 };
 
@@ -226,4 +415,12 @@ const withdrawFromWallet = async (req, res) => {
     }
 };
 
-module.exports = { getUsers, getMyMovements, depositToWallet, withdrawFromWallet };
+module.exports = {
+    getUsers,
+    getMyMovements,
+    depositToWallet,
+    withdrawFromWallet,
+    getAdminGroups,
+    moderateUser,
+    deleteGroupAsAdmin
+};

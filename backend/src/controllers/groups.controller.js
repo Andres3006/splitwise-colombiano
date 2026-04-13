@@ -913,6 +913,100 @@ const leaveGroup = async (req, res) => {
     }
 };
 
+const deleteGroup = async (req, res) => {
+    const client = await pool.connect();
+
+    try {
+        const { groupId } = req.params;
+
+        await client.query('BEGIN');
+
+        const groupResult = await client.query(
+            `SELECT id, created_by, name
+             FROM groups
+             WHERE id = $1
+             LIMIT 1`,
+            [groupId]
+        );
+
+        if (groupResult.rows.length === 0) {
+            await client.query('ROLLBACK');
+            return res.status(404).json({ error: 'El grupo no existe' });
+        }
+
+        const membershipResult = await client.query(
+            `SELECT id
+             FROM group_members
+             WHERE group_id = $1
+               AND user_id = $2
+               AND left_at IS NULL
+             LIMIT 1`,
+            [groupId, req.user.id]
+        );
+
+        if (membershipResult.rows.length === 0) {
+            await client.query('ROLLBACK');
+            return res.status(403).json({ error: 'No perteneces a este grupo' });
+        }
+
+        if (groupResult.rows[0].created_by !== req.user.id) {
+            await client.query('ROLLBACK');
+            return res.status(403).json({
+                error: 'Solo el creador del grupo puede eliminarlo'
+            });
+        }
+
+        const balancesResult = await client.query(
+            `SELECT 1
+             FROM balances
+             WHERE group_id = $1
+             LIMIT 1`,
+            [groupId]
+        );
+
+        if (balancesResult.rows.length > 0) {
+            await client.query('ROLLBACK');
+            return res.status(409).json({
+                error: 'No puedes eliminar el grupo mientras haya deudas pendientes entre sus miembros'
+            });
+        }
+
+        const activeLoansResult = await client.query(
+            `SELECT 1
+             FROM loans
+             WHERE group_id = $1
+               AND status = 'active'
+             LIMIT 1`,
+            [groupId]
+        );
+
+        if (activeLoansResult.rows.length > 0) {
+            await client.query('ROLLBACK');
+            return res.status(409).json({
+                error: 'No puedes eliminar el grupo mientras haya prestamos activos'
+            });
+        }
+
+        await client.query(
+            `DELETE FROM groups
+             WHERE id = $1`,
+            [groupId]
+        );
+
+        await client.query('COMMIT');
+
+        return res.json({
+            message: 'Grupo eliminado correctamente',
+            deleted_group_id: groupId
+        });
+    } catch (error) {
+        await client.query('ROLLBACK');
+        return res.status(error.statusCode || 500).json({ error: error.message });
+    } finally {
+        client.release();
+    }
+};
+
 const getGroupMessages = async (req, res) => {
     try {
         const { groupId } = req.params;
@@ -988,6 +1082,7 @@ module.exports = {
     respondToInvitation,
     getMyInvitations,
     leaveGroup,
+    deleteGroup,
     getGroupMessages,
     sendGroupMessage
 };

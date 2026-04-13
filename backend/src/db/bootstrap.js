@@ -23,4 +23,15 @@ const ensureSeedUserPasswords = async () => {
     );
 };
 
-module.exports = { ensureSeedUserPasswords };
+const ensureAdminAccountPrivileges = async () => {
+    await pool.query(
+        `UPDATE users
+         SET role = 'admin',
+             is_banned = FALSE,
+             blocked_until = NULL,
+             block_reason = NULL
+         WHERE LOWER(TRIM(email)) = 'admin@test.com'`
+    );
+};
+
+module.exports = { ensureSeedUserPasswords, ensureAdminAccountPrivileges };

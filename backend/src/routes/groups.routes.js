@@ -12,6 +12,7 @@ const {
     respondToInvitation,
     getMyInvitations,
     leaveGroup,
+    deleteGroup,
     getGroupMessages,
     sendGroupMessage
 } = require('../controllers/groups.controller');
@@ -25,6 +26,7 @@ router.get('/invitations/me', verifyToken, getMyInvitations);
 router.get('/:groupId/messages', verifyToken, getGroupMessages);
 router.get('/:groupId', verifyToken, getGroupDetails);
 router.post('/:groupId/join', verifyToken, joinPublicGroup);
+router.delete('/:groupId', verifyToken, deleteGroup);
 router.delete('/:groupId/leave', verifyToken, leaveGroup);
 router.post('/:groupId/messages', verifyToken, sendGroupMessage);
 router.post('/:groupId/members', verifyToken, addGroupMember);

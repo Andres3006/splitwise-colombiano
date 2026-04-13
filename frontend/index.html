@@ -43,6 +43,7 @@
                 <button class="nav-link" data-view="amigos" type="button">Amigos</button>
                 <button class="nav-link" data-view="grupos" type="button">Grupos</button>
                 <button class="nav-link" data-view="usuarios" type="button">Usuarios</button>
+                <button class="nav-link hidden" data-view="administracion" type="button">Administracion</button>
             </nav>
 
             <section class="sidebar-mini-panel">
@@ -301,6 +302,26 @@
                     </div>
                     <div id="users-list" class="table-list"></div>
                 </article>
+            </section>
+
+            <section id="view-administracion" class="dashboard-view">
+                <div class="content-grid">
+                    <article class="panel-card">
+                        <div class="panel-card-header">
+                            <h3>Moderacion de usuarios</h3>
+                            <button id="reload-admin-users-btn" class="ghost" type="button">Recargar</button>
+                        </div>
+                        <div id="admin-users-list" class="stack-list"></div>
+                    </article>
+
+                    <article class="panel-card">
+                        <div class="panel-card-header">
+                            <h3>Gestion de grupos</h3>
+                            <button id="reload-admin-groups-btn" class="ghost" type="button">Recargar</button>
+                        </div>
+                        <div id="admin-groups-list" class="stack-list"></div>
+                    </article>
+                </div>
             </section>
 
             <section id="view-amigos" class="dashboard-view">

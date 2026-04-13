@@ -11,6 +11,7 @@ const state = {
     payments: [],
     movements: [],
     loans: [],
+    adminGroups: [],
     groupMessages: [],
     dashboard: {},
     optimize: [],
@@ -114,8 +115,21 @@ const els = {
 
 els.navAmigos = document.querySelector('.nav-link[data-view="amigos"]');
 els.navMovimientos = document.querySelector('.nav-link[data-view="movimientos"]');
+els.navInicio = document.querySelector('.nav-link[data-view="inicio"]');
+els.navGrupos = document.querySelector('.nav-link[data-view="grupos"]');
+els.navUsuarios = document.querySelector('.nav-link[data-view="usuarios"]');
+els.navAdmin = document.querySelector('.nav-link[data-view="administracion"]');
 els.sidebarMiniPanel = document.querySelector('.sidebar-mini-panel');
 els.metricGroupsCard = $('metric-groups')?.closest('.stat-card');
+els.adminUsersList = $('admin-users-list');
+els.adminGroupsList = $('admin-groups-list');
+els.viewInicio = $('view-inicio');
+els.viewMovimientos = $('view-movimientos');
+els.viewGrupos = $('view-grupos');
+els.viewUsuarios = $('view-usuarios');
+els.viewAmigos = $('view-amigos');
+els.viewGrupo = $('view-grupo');
+els.viewAdministracion = $('view-administracion');
 
 const viewTitles = {
     inicio: 'Inicio',
@@ -123,7 +137,8 @@ const viewTitles = {
     grupos: 'Grupos',
     grupo: 'Grupo',
     usuarios: 'Usuarios',
-    amigos: 'Amigos'
+    amigos: 'Amigos',
+    administracion: 'Administracion'
 };
 
 const roleLabels = { owner: 'Propietario', admin: 'Administrador', member: 'Miembro' };
@@ -233,12 +248,27 @@ function setSessionStatus() {
 function updateAdminInterface() {
     const isAdmin = isAdminAccount(state.user);
 
+    els.navInicio?.classList.toggle('hidden', isAdmin);
+    els.navMovimientos?.classList.toggle('hidden', isAdmin);
     els.navAmigos?.classList.toggle('hidden', isAdmin);
+    els.navGrupos?.classList.toggle('hidden', isAdmin);
+    els.navUsuarios?.classList.toggle('hidden', isAdmin);
+    els.navAdmin?.classList.toggle('hidden', !isAdmin);
     els.sidebarMiniPanel?.classList.toggle('hidden', isAdmin);
     els.metricGroupsCard?.classList.toggle('hidden', isAdmin);
+    els.viewInicio?.classList.toggle('hidden', isAdmin);
+    els.viewMovimientos?.classList.toggle('hidden', isAdmin);
+    els.viewGrupos?.classList.toggle('hidden', isAdmin);
+    els.viewUsuarios?.classList.toggle('hidden', isAdmin);
+    els.viewAmigos?.classList.toggle('hidden', isAdmin);
+    els.viewGrupo?.classList.toggle('hidden', isAdmin);
+    els.viewAdministracion?.classList.toggle('hidden', !isAdmin);
 
-    if (isAdmin && state.activeView === 'amigos') {
-        setActiveView('inicio');
+    if (isAdmin && state.activeView !== 'administracion') {
+        state.selectedGroup = null;
+        state.groupMessages = [];
+        stopGroupMessagesPolling();
+        setActiveView('administracion');
     }
 }
 
@@ -324,8 +354,8 @@ function startGroupMessagesPolling() {
 }
 
 function setActiveView(view) {
-    const normalizedView = isAdminAccount(state.user) && view === 'amigos'
-        ? 'inicio'
+    const normalizedView = isAdminAccount(state.user)
+        ? 'administracion'
         : view;
 
     state.activeView = normalizedView;
@@ -476,6 +506,13 @@ function renderGroupDetail() {
 
     const { group, members } = state.selectedGroup;
     const currentMembership = members.find((member) => member.user_id === state.user?.id);
+    const canDeleteGroup = Boolean(
+        currentMembership
+        && (
+            currentMembership.role === 'owner'
+            || String(group.created_by || '') === String(state.user?.id || '')
+        )
+    );
     const canInviteMembers = Boolean(
         currentMembership && (!group.is_private || ['owner', 'admin'].includes(currentMembership.role))
     );
@@ -492,6 +529,11 @@ function renderGroupDetail() {
             <p>Cupo: ${members.length}/${group.max_members} personas</p>
             <p>Creado: ${formatDate(group.created_at)}</p>
             <div class="card-actions detail-actions">
+                ${canDeleteGroup ? `
+                    <button type="button" class="ghost danger-button" data-action="delete-group" data-group-id="${group.id}">
+                        Eliminar grupo
+                    </button>
+                ` : ''}
                 <button type="button" class="ghost" data-action="leave-group" data-group-id="${group.id}">Salir del grupo</button>
             </div>
         </div>
@@ -727,6 +769,68 @@ function renderSocialUsers() {
     `, 'No se encontraron usuarios.');
 }
 
+function renderAdminUsers() {
+    if (!els.adminUsersList) return;
+
+    const usersToModerate = state.users.filter((user) => !isAdminAccount(user));
+
+    renderList(els.adminUsersList, usersToModerate, (user) => {
+        const temporarilyBlocked = Boolean(user.is_temporarily_blocked);
+        const statusText = user.is_banned
+            ? 'Baneado'
+            : temporarilyBlocked
+                ? `Bloqueado hasta ${formatDate(user.blocked_until)}`
+                : user.has_overdue_loans
+                    ? 'Con deuda vencida'
+                    : 'Activo';
+
+        return `
+            <div class="info-card">
+                <div>
+                    <strong>${user.name}</strong>
+                    <p>${user.email}</p>
+                    <p>Estado: ${statusText}</p>
+                    ${user.block_reason ? `<p>Motivo: ${user.block_reason}</p>` : ''}
+                </div>
+                <div class="card-actions">
+                    ${user.is_banned ? `
+                        <button type="button" class="ghost" data-action="admin-unban-user" data-user-id="${user.id}">Quitar baneo</button>
+                    ` : `
+                        <button type="button" class="ghost" data-action="admin-ban-user" data-user-id="${user.id}">Banear</button>
+                    `}
+                    ${temporarilyBlocked ? `
+                        <button type="button" class="ghost" data-action="admin-unblock-user" data-user-id="${user.id}">Desbloquear</button>
+                    ` : `
+                        <button type="button" class="ghost" data-action="admin-block-user" data-user-id="${user.id}">Bloquear 7 dias</button>
+                    `}
+                </div>
+            </div>
+        `;
+    }, 'No hay usuarios disponibles para moderar.');
+}
+
+function renderAdminGroups() {
+    if (!els.adminGroupsList) return;
+
+    renderList(els.adminGroupsList, state.adminGroups, (group) => `
+        <div class="info-card">
+            <div>
+                <strong>${group.name}</strong>
+                <p>${group.description || 'Sin descripcion'}</p>
+                <p>Creador: ${group.creator_name || 'Sin creador'}</p>
+                <p>Miembros: ${group.total_members}/${group.max_members}</p>
+                <p>Deudas activas: ${group.balances_count || 0}</p>
+                <p>Prestamos activos: ${group.active_loans_count || 0}</p>
+            </div>
+            <div class="card-actions">
+                <button type="button" class="ghost danger-button" data-action="admin-delete-group" data-group-id="${group.id}">
+                    Eliminar grupo
+                </button>
+            </div>
+        </div>
+    `, 'No hay grupos registrados.');
+}
+
 function renderFriends() {
     renderList(els.friendsList, state.friends, (friend) => `
         <div class="row-card">
@@ -861,6 +965,13 @@ function renderGroupMessages() {
 
 function renderAll() {
     updateAdminInterface();
+
+    if (isAdminAccount(state.user)) {
+        renderAdminUsers();
+        renderAdminGroups();
+        return;
+    }
+
     renderMetrics();
     renderSelectors();
     renderGroups();
@@ -900,6 +1011,7 @@ async function fetchSession() {
 }
 
 const loadUsers = async () => { state.users = (await api('/api/users')).users; };
+const loadAdminGroups = async () => { state.adminGroups = (await api('/api/users/admin/groups')).groups; };
 const loadAllGroups = async () => { state.allGroups = (await api('/api/groups/me')).groups; };
 const loadGroups = async (search = currentGroupSearch()) => {
     const query = search ? `?search=${encodeURIComponent(search)}` : '';
@@ -929,6 +1041,15 @@ const loadSocialUsers = async (search = '') => {
 async function loadAll(searchUsers = '') {
     await fetchSession();
     if (!state.user) return;
+
+    if (isAdminAccount(state.user)) {
+        await Promise.all([
+            loadUsers(),
+            loadAdminGroups()
+        ]);
+        renderAll();
+        return;
+    }
 
     await Promise.all([
         loadUsers(),
@@ -987,6 +1108,15 @@ async function refreshGroupsData(search = currentGroupSearch()) {
     renderGroupInvitations();
     renderSidebarGroups();
     updateGroupSelectors();
+}
+
+async function refreshAdminData() {
+    await Promise.all([
+        loadUsers(),
+        loadAdminGroups()
+    ]);
+    renderAdminUsers();
+    renderAdminGroups();
 }
 
 function showCreateGroupCard() {
@@ -1373,6 +1503,60 @@ async function handleLeaveGroup(groupId) {
     setMessage('Saliste del grupo correctamente.');
 }
 
+async function handleDeleteGroup(groupId) {
+    await api(`/api/groups/${groupId}`, { method: 'DELETE' });
+    state.selectedGroup = null;
+    state.groupMessages = [];
+    state.showGroupMembers = false;
+    stopGroupMessagesPolling();
+    setActiveView('grupos');
+    await Promise.all([
+        loadAllGroups(),
+        loadGroups(),
+        loadPublicGroups(),
+        loadBalances(),
+        loadLoans(),
+        loadDashboard()
+    ]);
+    renderGroups();
+    renderSidebarGroups();
+    renderGroupDetail();
+    renderPublicGroups();
+    renderBalances();
+    renderLoans();
+    renderGroupLoans();
+    renderMetrics();
+    updateGroupSelectors();
+    setMessage('Grupo eliminado correctamente.');
+}
+
+async function handleAdminModeration(userId, action) {
+    const payload = { action };
+
+    if (action === 'ban') {
+        payload.reason = (window.prompt('Motivo del baneo:', 'Incumplimiento de normas') || '').trim();
+    }
+
+    if (action === 'block') {
+        payload.reason = (window.prompt('Motivo del bloqueo temporal:', 'Bloqueo temporal por revision') || '').trim();
+        payload.duration_days = Number(window.prompt('Cuantos dias quieres bloquear a este usuario?', '7') || '7') || 7;
+    }
+
+    await api(`/api/users/admin/users/${userId}/moderation`, {
+        method: 'PATCH',
+        body: JSON.stringify(payload)
+    });
+
+    await refreshAdminData();
+    setMessage('Moderacion aplicada correctamente.');
+}
+
+async function handleAdminDeleteGroup(groupId) {
+    await api(`/api/users/admin/groups/${groupId}`, { method: 'DELETE' });
+    await refreshAdminData();
+    setMessage('Grupo eliminado por administracion.');
+}
+
 async function handleSendFriendRequest(userId) {
     await api('/api/social/friend-requests', {
         method: 'POST',
@@ -1646,6 +1830,8 @@ async function handleSendGroupMessage(event) {
         ['reload-expenses-btn', () => loadExpenses().then(() => { renderExpenses(); setMessage('Gastos recargados.'); })],
         ['reload-payments-btn', () => loadPayments().then(() => { renderPayments(); setMessage('Pagos recargados.'); })],
         ['reload-group-invitations-btn', () => loadGroupInvitations().then(() => { renderGroupInvitations(); setMessage('Invitaciones de grupo recargadas.'); })],
+        ['reload-admin-users-btn', () => loadUsers().then(() => { renderAdminUsers(); setMessage('Usuarios recargados.'); })],
+        ['reload-admin-groups-btn', () => loadAdminGroups().then(() => { renderAdminGroups(); setMessage('Grupos recargados.'); })],
         ['reload-payment-users-btn', () => loadUsers().then(() => { renderSelectors(); setMessage('Usuarios para pagos recargados.'); })],
         ['reload-friends-btn', () => loadFriends().then(() => { renderFriends(); setMessage('Amigos recargados.'); })],
         ['reload-friend-requests-btn', () => loadFriendRequests().then(() => { renderFriendRequests(); setMessage('Solicitudes recargadas.'); })],
@@ -1670,6 +1856,12 @@ async function handleSendGroupMessage(event) {
             if (action === 'join-group') await handleJoinPublicGroup(button.dataset.groupId);
             if (action === 'open-group-detail') await handleOpenGroupDetail(button.dataset.groupId);
             if (action === 'leave-group') await handleLeaveGroup(button.dataset.groupId);
+            if (action === 'delete-group') await handleDeleteGroup(button.dataset.groupId);
+            if (action === 'admin-ban-user') await handleAdminModeration(button.dataset.userId, 'ban');
+            if (action === 'admin-unban-user') await handleAdminModeration(button.dataset.userId, 'unban');
+            if (action === 'admin-block-user') await handleAdminModeration(button.dataset.userId, 'block');
+            if (action === 'admin-unblock-user') await handleAdminModeration(button.dataset.userId, 'unblock');
+            if (action === 'admin-delete-group') await handleAdminDeleteGroup(button.dataset.groupId);
             if (action === 'send-friend-request') await handleSendFriendRequest(button.dataset.userId);
             if (action === 'remove-friend') await handleRemoveFriend(button.dataset.userId);
             if (action === 'cancel-friend-request') await handleCancelFriendRequest(button.dataset.requestId);
