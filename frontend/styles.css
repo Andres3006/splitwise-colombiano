@@ -482,6 +482,24 @@ textarea:focus {
     gap: 0.9rem;
 }
 
+#balances-list,
+#loans-summary-list,
+#movements-list,
+#payments-list,
+#public-groups-list,
+#group-invitations-list,
+#users-list,
+#friends-list,
+#friend-requests-received,
+#friend-requests-sent,
+#expenses-list,
+#expense-balances-list,
+#optimize-list {
+    max-height: 460px;
+    overflow-y: auto;
+    padding-right: 0.35rem;
+}
+
 .info-card,
 .row-card {
     border: 1px solid rgba(118, 166, 255, 0.14);
@@ -502,10 +520,55 @@ textarea:focus {
     color: var(--muted);
 }
 
+.movement-card {
+    border: 1px solid rgba(118, 166, 255, 0.14);
+    border-radius: 20px;
+    padding: 1rem 1.05rem;
+    background: linear-gradient(180deg, rgba(8, 16, 36, 0.92), rgba(6, 10, 22, 0.92));
+    display: flex;
+    justify-content: space-between;
+    gap: 1rem;
+}
+
+.movement-card strong {
+    display: block;
+    margin-bottom: 0.35rem;
+}
+
+.movement-card p {
+    margin: 0.18rem 0;
+    color: var(--muted);
+}
+
+.movement-card-in {
+    border-color: rgba(72, 208, 168, 0.34);
+    background: linear-gradient(180deg, rgba(9, 34, 28, 0.96), rgba(5, 18, 14, 0.96));
+}
+
+.movement-card-out {
+    border-color: rgba(255, 118, 118, 0.24);
+    background: linear-gradient(180deg, rgba(30, 14, 24, 0.96), rgba(14, 8, 16, 0.96));
+}
+
+.movement-card-loan {
+    border-color: rgba(98, 153, 255, 0.32);
+    background: linear-gradient(180deg, rgba(10, 20, 44, 0.96), rgba(6, 12, 25, 0.96));
+}
+
 .row-card {
     display: flex;
     justify-content: space-between;
     gap: 1rem;
+}
+
+.row-card:has(.inline-group-detail) {
+    display: grid;
+}
+
+.inline-group-detail {
+    grid-column: 1 / -1;
+    width: 100%;
+    margin-top: 0.6rem;
 }
 
 .row-meta {
@@ -586,6 +649,12 @@ textarea:focus {
 .panel-section {
     display: grid;
     gap: 0.8rem;
+}
+
+#group-loans-list {
+    max-height: 470px;
+    overflow-y: auto;
+    padding-right: 0.35rem;
 }
 
 .compact-form {

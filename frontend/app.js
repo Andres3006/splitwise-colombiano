@@ -3,11 +3,13 @@ const state = {
     user: null,
     users: [],
     groups: [],
+    allGroups: [],
     publicGroups: [],
     selectedGroup: null,
     balances: [],
     expenses: [],
     payments: [],
+    movements: [],
     loans: [],
     groupMessages: [],
     dashboard: {},
@@ -68,6 +70,11 @@ const els = {
     groupLoanForm: $('group-loan-form'),
     groupLoanFormCard: $('group-loan-form-card'),
     showGroupLoanFormBtn: $('show-group-loan-form-btn'),
+    groupInviteForm: $('group-invite-form'),
+    groupInviteFormCard: $('group-invite-form-card'),
+    groupInviteUserName: $('group-invite-user-name'),
+    groupInviteUserId: $('group-invite-user-id'),
+    groupInviteUsers: $('group-invite-users'),
     groupLoanTargetName: $('group-loan-target-name'),
     groupLoanTargetId: $('group-loan-target-id'),
     groupLoanAmount: $('group-loan-amount'),
@@ -84,6 +91,7 @@ const els = {
     usersList: $('users-list'),
     friendsList: $('friends-list'),
     loansSummaryList: $('loans-summary-list'),
+    movementsList: $('movements-list'),
     groupLoansList: $('group-loans-list'),
     groupMessagesList: $('group-messages-list'),
     friendRequestsReceived: $('friend-requests-received'),
@@ -104,9 +112,16 @@ const els = {
     toggleCustomSplitBtn: $('toggle-custom-split-btn')
 };
 
+els.navAmigos = document.querySelector('.nav-link[data-view="amigos"]');
+els.navMovimientos = document.querySelector('.nav-link[data-view="movimientos"]');
+els.sidebarMiniPanel = document.querySelector('.sidebar-mini-panel');
+els.metricGroupsCard = $('metric-groups')?.closest('.stat-card');
+
 const viewTitles = {
     inicio: 'Inicio',
+    movimientos: 'Movimientos',
     grupos: 'Grupos',
+    grupo: 'Grupo',
     usuarios: 'Usuarios',
     amigos: 'Amigos'
 };
@@ -114,13 +129,28 @@ const viewTitles = {
 const roleLabels = { owner: 'Propietario', admin: 'Administrador', member: 'Miembro' };
 const splitTypeLabels = { equal: 'Division equitativa', custom: 'Division personalizada' };
 const invitationStatusLabels = { pending: 'Pendiente', accepted: 'Aceptada', rejected: 'Rechazada' };
+const loanStatusLabels = {
+    pending: 'Pendiente',
+    active: 'Activo',
+    rejected: 'Rechazado',
+    cancelled: 'Cancelado',
+    paid: 'Pagado'
+};
 const MIN_GROUP_LOAN_AMOUNT = 1000;
 const GROUP_LOAN_STEP = 50;
 const MIN_DEBT_PAYMENT_AMOUNT = 50;
 const DEBT_PAYMENT_STEP = 50;
 const MAX_GROUP_LOAN_TERM_DAYS = 15;
+const APP_AUTO_REFRESH_MS = 4000;
 let groupMessagesPollId = null;
+let appAutoRefreshId = null;
+let appAutoRefreshInFlight = false;
 let messageTimeoutId = null;
+
+const isAdminAccount = (user) => (
+    String(user?.role || '').toLowerCase() === 'admin'
+    || String(user?.email || '').trim().toLowerCase() === 'admin@test.com'
+);
 
 function setMessage(value, visible = true) {
     const content = typeof value === 'string'
@@ -200,9 +230,70 @@ function setSessionStatus() {
         : 'Sin sesion';
 }
 
+function updateAdminInterface() {
+    const isAdmin = isAdminAccount(state.user);
+
+    els.navAmigos?.classList.toggle('hidden', isAdmin);
+    els.sidebarMiniPanel?.classList.toggle('hidden', isAdmin);
+    els.metricGroupsCard?.classList.toggle('hidden', isAdmin);
+
+    if (isAdmin && state.activeView === 'amigos') {
+        setActiveView('inicio');
+    }
+}
+
 function setViewMode(isAuthenticated) {
     els.authScreen.classList.toggle('hidden', isAuthenticated);
     els.appShell.classList.toggle('hidden', !isAuthenticated);
+}
+
+function stopAppAutoRefresh() {
+    if (!appAutoRefreshId) return;
+    clearInterval(appAutoRefreshId);
+    appAutoRefreshId = null;
+}
+
+function shouldPauseAppAutoRefresh() {
+    if (document.hidden) return true;
+
+    const activeElement = document.activeElement;
+    if (!activeElement) return false;
+
+    return Boolean(activeElement.closest('form') && ['INPUT', 'TEXTAREA', 'SELECT'].includes(activeElement.tagName));
+}
+
+async function refreshAppSilently() {
+    if (!state.token || appAutoRefreshInFlight || shouldPauseAppAutoRefresh()) return;
+
+    appAutoRefreshInFlight = true;
+
+    try {
+        await loadAll(els.userSearch?.value || '');
+    } catch (error) {
+        if (String(error.message || '').toLowerCase().includes('token')) {
+            stopAppAutoRefresh();
+            stopGroupMessagesPolling();
+            localStorage.removeItem('splitwise_token');
+            state.token = '';
+            state.user = null;
+            state.selectedGroup = null;
+            state.groupMessages = [];
+            setViewMode(false);
+            setSessionStatus();
+            setMessage('Tu sesion vencio. Vuelve a iniciar sesion.');
+        }
+    } finally {
+        appAutoRefreshInFlight = false;
+    }
+}
+
+function startAppAutoRefresh() {
+    stopAppAutoRefresh();
+    if (!state.token) return;
+
+    appAutoRefreshId = setInterval(() => {
+        refreshAppSilently();
+    }, APP_AUTO_REFRESH_MS);
 }
 
 function stopGroupMessagesPolling() {
@@ -233,13 +324,19 @@ function startGroupMessagesPolling() {
 }
 
 function setActiveView(view) {
-    state.activeView = view;
-    els.viewTitle.textContent = viewTitles[view] || 'Inicio';
+    const normalizedView = isAdminAccount(state.user) && view === 'amigos'
+        ? 'inicio'
+        : view;
+
+    state.activeView = normalizedView;
+    els.viewTitle.textContent = normalizedView === 'grupo'
+        ? (state.selectedGroup?.group?.name || 'Grupo')
+        : (viewTitles[normalizedView] || 'Inicio');
     document.querySelectorAll('.dashboard-view').forEach((section) => {
-        section.classList.toggle('active-view', section.id === `view-${view}`);
+        section.classList.toggle('active-view', section.id === `view-${normalizedView}`);
     });
     els.navLinks.forEach((button) => {
-        button.classList.toggle('active', button.dataset.view === view);
+        button.classList.toggle('active', button.dataset.view === normalizedView);
     });
 }
 
@@ -262,6 +359,21 @@ const renderList = (target, items, renderer, emptyText) => {
     target.innerHTML = items.length ? items.map(renderer).join('') : `<p class="empty-state">${emptyText}</p>`;
 };
 const currentGroupSearch = () => els.groupSearch?.value?.trim() || '';
+
+function bindMoneyInput(input) {
+    if (!input) return;
+
+    input.addEventListener('input', (event) => {
+        const parsed = parseMoneyInput(event.target.value);
+        event.target.value = parsed ? formatMoneyInput(parsed) : '';
+    });
+
+    input.addEventListener('blur', () => {
+        const parsed = parseMoneyInput(input.value);
+        if (!parsed) return;
+        input.value = formatMoneyInput(parsed);
+    });
+}
 
 function renderMetrics() {
     $('metric-pay').textContent = money.format(Number(state.dashboard.total_to_pay || 0));
@@ -299,14 +411,15 @@ function updateCustomSplitInputs() {
 function renderSelectors() {
     if (!els.expenseParticipantsOptions || !els.expensePaidBy || !els.paymentToUser) return;
     const myId = state.user?.id;
-    const otherUsers = state.users.filter((user) => user.id !== myId);
+    const allowedUsers = state.users.filter((user) => !isAdminAccount(user));
+    const otherUsers = allowedUsers.filter((user) => user.id !== myId);
 
-    els.expenseParticipantsOptions.innerHTML = state.users.length
-        ? state.users.map((user) => `<label class="checkbox-item"><input type="checkbox" value="${user.id}" ${user.id === myId ? 'checked' : ''}><span>${user.name}</span></label>`).join('')
+    els.expenseParticipantsOptions.innerHTML = allowedUsers.length
+        ? allowedUsers.map((user) => `<label class="checkbox-item"><input type="checkbox" value="${user.id}" ${user.id === myId ? 'checked' : ''}><span>${user.name}</span></label>`).join('')
         : '<p class="empty-state">No hay usuarios para dividir el gasto.</p>';
 
-    els.expensePaidBy.innerHTML = state.users.length
-        ? state.users.map((user) => `<option value="${user.id}" ${user.id === myId ? 'selected' : ''}>${user.name}</option>`).join('')
+    els.expensePaidBy.innerHTML = allowedUsers.length
+        ? allowedUsers.map((user) => `<option value="${user.id}" ${user.id === myId ? 'selected' : ''}>${user.name}</option>`).join('')
         : '<option value="">Sin usuarios</option>';
 
     els.paymentToUser.innerHTML = otherUsers.length
@@ -332,9 +445,12 @@ function renderGroups() {
 }
 
 function renderSidebarGroups() {
-    const groupsToShow = state.selectedGroup?.group
-        ? state.groups.filter((group) => group.id === state.selectedGroup.group.id)
-        : state.groups.slice(0, 5);
+    if (isAdminAccount(state.user)) {
+        renderList(els.sidebarGroupsList, [], () => '', 'Sin grupos disponibles.');
+        return;
+    }
+
+    const groupsToShow = state.allGroups;
 
     renderList(els.sidebarGroupsList, groupsToShow, (group) => `
         <button
@@ -353,23 +469,25 @@ function renderGroupDetail() {
     if (!els.groupDetailCard || !els.groupDetailContent) return;
     if (!state.selectedGroup) {
         els.groupDetailCard.classList.add('hidden');
-        els.publicGroupsCard?.classList.remove('hidden');
         els.groupDetailContent.innerHTML = '';
-        if (els.toggleGroupMembersBtn) {
-            els.toggleGroupMembersBtn.textContent = 'Ver miembros';
-        }
+        els.groupInviteFormCard?.classList.add('hidden');
         return;
     }
 
     const { group, members } = state.selectedGroup;
+    const currentMembership = members.find((member) => member.user_id === state.user?.id);
+    const canInviteMembers = Boolean(
+        currentMembership && (!group.is_private || ['owner', 'admin'].includes(currentMembership.role))
+    );
     els.groupDetailCard.classList.remove('hidden');
-    els.publicGroupsCard?.classList.add('hidden');
+    els.groupInviteFormCard?.classList.toggle('hidden', !canInviteMembers);
     if (els.toggleGroupMembersBtn) {
         els.toggleGroupMembersBtn.textContent = state.showGroupMembers ? 'Ocultar miembros' : 'Ver miembros';
     }
     els.groupDetailContent.innerHTML = `
         <div class="detail-block">
             <strong>${group.name}</strong>
+            <p>${group.description || 'Sin descripcion'}</p>
             <p>${group.is_private ? 'Grupo privado' : 'Grupo publico'}</p>
             <p>Cupo: ${members.length}/${group.max_members} personas</p>
             <p>Creado: ${formatDate(group.created_at)}</p>
@@ -511,6 +629,59 @@ function renderPayments() {
     `, 'Aun no hay pagos registrados.');
 }
 
+function renderMovements() {
+    if (!els.movementsList) return;
+
+    const movementLabels = {
+        deposit: 'Consignacion recibida',
+        withdraw: 'Retiro realizado',
+        payment_sent: 'Dinero enviado',
+        payment_received: 'Dinero recibido',
+        loan_lent: 'Prestamo realizado',
+        loan_borrowed: 'Prestamo solicitado'
+    };
+
+    renderList(els.movementsList, state.movements, (movement) => {
+        const movementType = movement.movement_type;
+        const isIncoming = ['deposit', 'payment_received'].includes(movementType);
+        const isLoan = ['loan_lent', 'loan_borrowed'].includes(movementType);
+        const movementClass = isIncoming
+            ? 'movement-card movement-card-in'
+            : isLoan
+                ? 'movement-card movement-card-loan'
+                : 'movement-card movement-card-out';
+
+        const detailText = movementType === 'deposit'
+            ? 'Consignaste dinero a tu cuenta'
+            : movementType === 'withdraw'
+                ? 'Retiraste dinero de tu cuenta'
+                : movementType === 'payment_sent'
+                    ? `Enviaste dinero a ${movement.related_user_name}`
+                    : movementType === 'payment_received'
+                        ? `${movement.related_user_name} te envio dinero`
+                        : movementType === 'loan_lent'
+                            ? `Prestaste dinero a ${movement.related_user_name}`
+                            : `Le pediste dinero a ${movement.related_user_name}`;
+
+        return `
+            <div class="${movementClass}">
+                <div>
+                    <strong>${money.format(Number(movement.amount || 0))}</strong>
+                    <p>${movementLabels[movementType] || movementType}</p>
+                    <p>${detailText}</p>
+                    ${movement.due_date ? `<p>Fecha de pago: ${formatDate(movement.due_date)}</p>` : ''}
+                    ${movement.loan_status ? `<p>Estado: ${loanStatusLabels[movement.loan_status] || movement.loan_status}</p>` : ''}
+                    ${movement.reference ? `<p>${movement.reference}</p>` : ''}
+                </div>
+                <div class="row-meta">
+                    <span class="chip">${isIncoming ? 'Entrada' : isLoan ? 'Prestamo' : 'Salida'}</span>
+                    <span>${formatDate(movement.created_at)}</span>
+                </div>
+            </div>
+        `;
+    }, 'Aun no hay movimientos registrados.');
+}
+
 function renderGroupInvitations() {
     renderList(els.groupInvitationsList, state.groupInvitations, (invitation) => `
         <div class="info-card">
@@ -537,7 +708,9 @@ function renderSocialUsers() {
                 <p>${user.email}</p>
             </div>
             <div class="card-actions">
-                ${user.is_friend ? `
+                ${isAdminAccount(user) ? `
+                    <span class="chip">Administrador</span>
+                ` : user.is_friend ? `
                     <span class="chip">Amigo</span>
                     <button type="button" class="ghost" data-action="remove-friend" data-user-id="${user.id}">Dejar de ser amigos</button>
                 ` : user.pending_request_direction === 'sent' ? `
@@ -607,7 +780,7 @@ function renderLoans() {
                 <p>${loan.description || 'Sin mensaje adicional'}</p>
             </div>
             <div class="row-meta">
-                <span>${loan.status}</span>
+                <span>${loanStatusLabels[loan.status] || loan.status}</span>
                 <span>Vence ${formatDate(loan.due_date)}</span>
             </div>
         </div>
@@ -630,7 +803,7 @@ function renderGroupLoans() {
                 <p>${loan.description || 'Sin mensaje adicional'}</p>
             </div>
             <div class="card-actions">
-                <span class="chip">${loan.status}</span>
+                <span class="chip">${loanStatusLabels[loan.status] || loan.status}</span>
                 ${loan.status === 'pending' && loan.lender_id === state.user?.id ? `
                     <button type="button" data-action="respond-loan" data-loan-id="${loan.id}" data-response="accept">Aceptar</button>
                     <button type="button" class="ghost" data-action="respond-loan" data-loan-id="${loan.id}" data-response="reject">Rechazar</button>
@@ -646,13 +819,33 @@ function renderGroupLoans() {
 function syncGroupLoanMembers() {
     if (!els.groupLoanMembers) return;
     const members = state.selectedGroup?.members || [];
-    const availableMembers = members.filter((member) => member.user_id !== state.user?.id);
+    const availableMembers = members.filter((member) => (
+        member.user_id !== state.user?.id
+        && !isAdminAccount(member)
+    ));
 
     if (els.groupLoanMembers) {
         els.groupLoanMembers.innerHTML = availableMembers
             .map((member) => `<option value="${member.name} - ${member.email}"></option>`)
             .join('');
     }
+}
+
+function syncGroupInviteCandidates() {
+    if (!els.groupInviteUsers) return;
+
+    const members = state.selectedGroup?.members || [];
+    const currentMemberIds = new Set(members.map((member) => member.user_id));
+    const availableUsers = state.users.filter((user) => (
+        !currentMemberIds.has(user.id)
+        && !user.is_banned
+        && !user.has_overdue_loans
+        && !isAdminAccount(user)
+    ));
+
+    els.groupInviteUsers.innerHTML = availableUsers
+        .map((user) => `<option value="${user.name} - ${user.email}"></option>`)
+        .join('');
 }
 
 function renderGroupMessages() {
@@ -667,6 +860,7 @@ function renderGroupMessages() {
 }
 
 function renderAll() {
+    updateAdminInterface();
     renderMetrics();
     renderSelectors();
     renderGroups();
@@ -678,6 +872,7 @@ function renderAll() {
     renderOptimize();
     renderExpenses();
     renderPayments();
+    renderMovements();
     renderGroupInvitations();
     renderSocialUsers();
     renderFriends();
@@ -686,10 +881,12 @@ function renderAll() {
     renderGroupLoans();
     renderGroupMessages();
     syncGroupLoanMembers();
+    syncGroupInviteCandidates();
 }
 
 async function fetchSession() {
     if (!state.token) {
+        stopAppAutoRefresh();
         state.user = null;
         setSessionStatus();
         setViewMode(false);
@@ -703,6 +900,7 @@ async function fetchSession() {
 }
 
 const loadUsers = async () => { state.users = (await api('/api/users')).users; };
+const loadAllGroups = async () => { state.allGroups = (await api('/api/groups/me')).groups; };
 const loadGroups = async (search = currentGroupSearch()) => {
     const query = search ? `?search=${encodeURIComponent(search)}` : '';
     state.groups = (await api(`/api/groups/me${query}`)).groups;
@@ -715,6 +913,7 @@ const loadGroupDetails = async (groupId) => { state.selectedGroup = await api(`/
 const loadBalances = async () => { state.balances = (await api('/api/balances/me')).balances; };
 const loadExpenses = async () => { state.expenses = (await api('/api/expenses')).expenses; };
 const loadPayments = async () => { state.payments = (await api('/api/payments/me')).payments; };
+const loadMovements = async () => { state.movements = (await api('/api/users/me/movements')).movements; };
 const loadLoans = async () => { state.loans = (await api('/api/loans/me')).loans; };
 const loadGroupMessages = async (groupId) => { state.groupMessages = (await api(`/api/groups/${groupId}/messages`)).messages; };
 const loadDashboard = async () => { state.dashboard = await api('/api/dashboard/me'); };
@@ -733,11 +932,13 @@ async function loadAll(searchUsers = '') {
 
     await Promise.all([
         loadUsers(),
+        loadAllGroups(),
         loadGroups(),
         loadPublicGroups(),
         loadBalances(),
         loadExpenses(),
         loadPayments(),
+        loadMovements(),
         loadLoans(),
         loadDashboard(),
         loadOptimize(),
@@ -776,6 +977,7 @@ async function refreshSocialData() {
 
 async function refreshGroupsData(search = currentGroupSearch()) {
     await Promise.all([
+        loadAllGroups(),
         loadGroups(search),
         loadPublicGroups(search),
         loadGroupInvitations()
@@ -902,6 +1104,7 @@ async function handleLogin(event) {
         state.token = data.token;
         localStorage.setItem('splitwise_token', data.token);
         await loadAll();
+        startAppAutoRefresh();
         setActiveView('inicio');
         setMessage('Sesion iniciada correctamente.');
     } catch (error) {
@@ -944,7 +1147,7 @@ async function handleCreateExpense(event) {
             method: 'POST',
             body: JSON.stringify({
                 description: $('expense-description').value,
-                amount: Number($('expense-amount').value),
+                amount: parseMoneyInput($('expense-amount').value),
                 group_id: els.expenseGroup.value || null,
                 paid_by: els.expensePaidBy.value,
                 split_type: splitType,
@@ -969,7 +1172,7 @@ async function handleCreateExpense(event) {
 async function handleCreatePayment(event) {
     event.preventDefault();
     try {
-        const paymentAmount = Number($('payment-amount').value);
+        const paymentAmount = parseMoneyInput($('payment-amount').value);
         const availableBalance = Number(state.dashboard.available_balance || 0);
 
         if (!Number.isFinite(paymentAmount) || paymentAmount <= 0) {
@@ -989,12 +1192,13 @@ async function handleCreatePayment(event) {
             })
         });
         els.paymentForm.reset();
-        await Promise.all([loadPayments(), loadBalances(), loadDashboard(), loadOptimize()]);
+        await Promise.all([loadPayments(), loadBalances(), loadDashboard(), loadOptimize(), loadMovements()]);
         renderPayments();
         renderBalances();
         renderBalances(els.expenseBalancesList);
         renderMetrics();
         renderOptimize();
+        renderMovements();
         setMessage('Pago registrado correctamente.');
     } catch (error) {
         setMessage(error.message);
@@ -1007,12 +1211,13 @@ async function handleDeposit(event) {
         await api('/api/users/me/wallet/deposit', {
             method: 'POST',
             body: JSON.stringify({
-                amount: Number($('deposit-amount').value)
+                amount: parseMoneyInput($('deposit-amount').value)
             })
         });
         els.depositForm.reset();
-        await loadDashboard();
+        await Promise.all([loadDashboard(), loadMovements()]);
         renderMetrics();
+        renderMovements();
         setMessage('Saldo consignado correctamente.');
     } catch (error) {
         setMessage(error.message);
@@ -1025,12 +1230,13 @@ async function handleWithdraw(event) {
         await api('/api/users/me/wallet/withdraw', {
             method: 'POST',
             body: JSON.stringify({
-                amount: Number($('withdraw-amount').value)
+                amount: parseMoneyInput($('withdraw-amount').value)
             })
         });
         els.withdrawForm.reset();
-        await loadDashboard();
+        await Promise.all([loadDashboard(), loadMovements()]);
         renderMetrics();
+        renderMovements();
         setMessage('Dinero retirado correctamente.');
     } catch (error) {
         setMessage(error.message);
@@ -1079,6 +1285,57 @@ async function handleCreateLoan(event) {
     }
 }
 
+async function handleInviteUserToGroup(event) {
+    event.preventDefault();
+
+    try {
+        const typedName = els.groupInviteUserName.value.trim().toLowerCase();
+        const members = state.selectedGroup?.members || [];
+        const currentMemberIds = new Set(members.map((member) => member.user_id));
+        const availableUsers = state.users.filter((user) => (
+            !currentMemberIds.has(user.id)
+            && !user.is_banned
+            && !user.has_overdue_loans
+            && !isAdminAccount(user)
+        ));
+        const exactLabelMatch = availableUsers.find((user) => (
+            `${user.name} - ${user.email}`.trim().toLowerCase() === typedName
+        ));
+        const exactNameMatch = availableUsers.find((user) => (
+            user.name.trim().toLowerCase() === typedName
+        ));
+        const startsWithNameMatch = availableUsers.find((user) => (
+            user.name.trim().toLowerCase().startsWith(typedName)
+        ));
+        const targetUser = exactLabelMatch || exactNameMatch || startsWithNameMatch;
+
+        if (!targetUser) {
+            throw new Error('Debes elegir una persona valida para invitar');
+        }
+
+        els.groupInviteUserName.value = targetUser.name;
+        els.groupInviteUserId.value = targetUser.id;
+
+        await api(`/api/groups/${state.selectedGroup?.group?.id}/invitations`, {
+            method: 'POST',
+            body: JSON.stringify({ invited_user_id: els.groupInviteUserId.value })
+        });
+
+        els.groupInviteForm.reset();
+        els.groupInviteUserId.value = '';
+        await Promise.all([
+            loadGroupInvitations(),
+            loadGroupDetails(state.selectedGroup?.group?.id)
+        ]);
+        renderGroupDetail();
+        renderGroupInvitations();
+        syncGroupInviteCandidates();
+        setMessage('Invitacion enviada correctamente.');
+    } catch (error) {
+        setMessage(error.message);
+    }
+}
+
 async function handleJoinPublicGroup(groupId) {
     await api(`/api/groups/${groupId}/join`, { method: 'POST' });
     await loadAll();
@@ -1090,8 +1347,9 @@ async function handleOpenGroupDetail(groupId) {
     await loadGroupDetails(groupId);
     await loadGroupMessages(groupId);
     state.showGroupMembers = false;
-    setActiveView('grupos');
+    setActiveView('grupo');
     renderSidebarGroups();
+    renderGroups();
     renderGroupDetail();
     renderGroupLoans();
     renderGroupMessages();
@@ -1150,12 +1408,19 @@ async function handleRespondGroupInvitation(invitationId, action) {
         method: 'PATCH',
         body: JSON.stringify({ action })
     });
-    await Promise.all([loadGroupInvitations(), loadGroups(), loadPublicGroups(), loadDashboard()]);
+    await Promise.all([loadGroupInvitations(), loadAllGroups(), loadGroups(), loadPublicGroups(), loadDashboard()]);
     renderGroupInvitations();
+    renderSidebarGroups();
     renderGroups();
     renderPublicGroups();
     renderMetrics();
     updateGroupSelectors();
+    if (action === 'accept') {
+        const acceptedInvitation = state.groupInvitations.find((invitation) => invitation.id === invitationId);
+        if (acceptedInvitation?.group_id) {
+            await handleOpenGroupDetail(acceptedInvitation.group_id);
+        }
+    }
     setMessage(action === 'accept' ? 'Invitacion aceptada.' : 'Invitacion rechazada.');
 }
 
@@ -1233,6 +1498,7 @@ async function handleSendGroupMessage(event) {
             handleDebtPayment(event).catch((error) => setMessage(error.message));
         });
         els.paymentForm?.addEventListener('submit', handleCreatePayment);
+        els.groupInviteForm?.addEventListener('submit', handleInviteUserToGroup);
         els.groupLoanForm?.addEventListener('submit', handleCreateLoan);
     els.groupMessageForm?.addEventListener('submit', handleSendGroupMessage);
 
@@ -1241,6 +1507,7 @@ async function handleSendGroupMessage(event) {
           state.user = null;
           state.selectedGroup = null;
           state.groupMessages = [];
+          stopAppAutoRefresh();
           stopGroupMessagesPolling();
           localStorage.removeItem('splitwise_token');
           setViewMode(false);
@@ -1258,7 +1525,9 @@ async function handleSendGroupMessage(event) {
           state.showGroupMembers = false;
           state.groupMessages = [];
           stopGroupMessagesPolling();
+          setActiveView('grupos');
           renderSidebarGroups();
+          renderGroups();
           renderGroupDetail();
           renderGroupMessages();
       });
@@ -1272,14 +1541,12 @@ async function handleSendGroupMessage(event) {
     els.decreaseGroupLoanAmountBtn?.addEventListener('click', () => adjustGroupLoanAmount(-GROUP_LOAN_STEP));
     els.increaseDebtPaymentAmountBtn?.addEventListener('click', () => adjustDebtPaymentAmount(DEBT_PAYMENT_STEP));
     els.decreaseDebtPaymentAmountBtn?.addEventListener('click', () => adjustDebtPaymentAmount(-DEBT_PAYMENT_STEP));
-    els.groupLoanAmount?.addEventListener('input', (event) => {
-        const parsed = parseMoneyInput(event.target.value);
-        event.target.value = parsed ? formatMoneyInput(parsed) : '';
-    });
-    els.debtPaymentAmount?.addEventListener('input', (event) => {
-        const parsed = parseMoneyInput(event.target.value);
-        event.target.value = parsed ? formatMoneyInput(parsed) : '';
-    });
+    bindMoneyInput(els.groupLoanAmount);
+    bindMoneyInput(els.debtPaymentAmount);
+    bindMoneyInput($('deposit-amount'));
+    bindMoneyInput($('withdraw-amount'));
+    bindMoneyInput($('expense-amount'));
+    bindMoneyInput($('payment-amount'));
     els.groupLoanAmount?.addEventListener('blur', () => {
         const parsed = parseMoneyInput(els.groupLoanAmount.value);
         if (!parsed) return;
@@ -1383,6 +1650,7 @@ async function handleSendGroupMessage(event) {
         ['reload-friends-btn', () => loadFriends().then(() => { renderFriends(); setMessage('Amigos recargados.'); })],
         ['reload-friend-requests-btn', () => loadFriendRequests().then(() => { renderFriendRequests(); setMessage('Solicitudes recargadas.'); })],
         ['reload-loans-btn', () => loadLoans().then(() => { renderLoans(); renderGroupLoans(); setMessage('Prestamos recargados.'); })],
+        ['reload-movements-btn', () => loadMovements().then(() => { renderMovements(); setMessage('Movimientos recargados.'); })],
         ['reload-group-loans-btn', () => loadLoans().then(() => { renderLoans(); renderGroupLoans(); setMessage('Prestamos del grupo recargados.'); })],
         ['reload-group-messages-btn', () => {
             const groupId = state.selectedGroup?.group?.id;
@@ -1435,10 +1703,12 @@ async function bootstrap() {
 
     try {
         await loadAll();
+        startAppAutoRefresh();
         setMessage('Sesion recuperada.');
     } catch (error) {
         localStorage.removeItem('splitwise_token');
         state.token = '';
+        stopAppAutoRefresh();
         setViewMode(false);
         setMessage(error.message);
     }

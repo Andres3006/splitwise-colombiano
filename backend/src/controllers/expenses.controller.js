@@ -1,4 +1,5 @@
 const pool = require('../db/connection');
+const { getUserAccountState, isAdminAccount } = require('../utils/account-state');
 
 const roundToTwo = (value) => Number(Number(value).toFixed(2));
 
@@ -50,7 +51,7 @@ const buildCustomShares = (totalAmount, participants) => {
 
 const getUserMap = async (client, userIds) => {
     const result = await client.query(
-        `SELECT id, name, is_banned
+        `SELECT id, name, is_banned, role
          FROM users
          WHERE id = ANY($1::uuid[])`,
         [userIds]
@@ -412,6 +413,86 @@ const settleLoan = async (client, { loanId = null, groupId, borrowerId, lenderId
     };
 };
 
+const settleIndirectBalance = async (client, { groupId, fromUserId, intermediaryUserId, finalUserId, amount }) => {
+    const firstLegResult = await client.query(
+        `SELECT id, amount
+         FROM balances
+         WHERE debtor_id = $1
+           AND creditor_id = $2
+           AND group_id IS NOT DISTINCT FROM $3
+         LIMIT 1
+         FOR UPDATE`,
+        [fromUserId, intermediaryUserId, groupId]
+    );
+
+    const secondLegResult = await client.query(
+        `SELECT id, amount
+         FROM balances
+         WHERE debtor_id = $1
+           AND creditor_id = $2
+           AND group_id IS NOT DISTINCT FROM $3
+         LIMIT 1
+         FOR UPDATE`,
+        [intermediaryUserId, finalUserId, groupId]
+    );
+
+    if (firstLegResult.rows.length === 0 || secondLegResult.rows.length === 0) {
+        const error = new Error('No existe una cadena valida de deuda para pagar a esta persona');
+        error.statusCode = 400;
+        throw error;
+    }
+
+    const firstAmount = roundToTwo(Number(firstLegResult.rows[0].amount || 0));
+    const secondAmount = roundToTwo(Number(secondLegResult.rows[0].amount || 0));
+    const allowedAmount = roundToTwo(Math.min(firstAmount, secondAmount));
+
+    if (amount > allowedAmount) {
+        const error = new Error('El pago excede el monto permitido en la cadena de deuda');
+        error.statusCode = 400;
+        throw error;
+    }
+
+    const firstRemaining = roundToTwo(firstAmount - amount);
+    const secondRemaining = roundToTwo(secondAmount - amount);
+
+    if (firstRemaining > 0) {
+        await client.query(
+            `UPDATE balances
+             SET amount = $1, updated_at = CURRENT_TIMESTAMP
+             WHERE id = $2`,
+            [firstRemaining, firstLegResult.rows[0].id]
+        );
+    } else {
+        await client.query(
+            `DELETE FROM balances
+             WHERE id = $1`,
+            [firstLegResult.rows[0].id]
+        );
+    }
+
+    if (secondRemaining > 0) {
+        await client.query(
+            `UPDATE balances
+             SET amount = $1, updated_at = CURRENT_TIMESTAMP
+             WHERE id = $2`,
+            [secondRemaining, secondLegResult.rows[0].id]
+        );
+    } else {
+        await client.query(
+            `DELETE FROM balances
+             WHERE id = $1`,
+            [secondLegResult.rows[0].id]
+        );
+    }
+
+    return {
+        indirect: true,
+        intermediary_user_id: intermediaryUserId,
+        remaining_amount: 0,
+        cleared: firstRemaining === 0 && secondRemaining === 0
+    };
+};
+
 const createExpense = async (req, res) => {
     const client = await pool.connect();
 
@@ -461,12 +542,12 @@ const createExpense = async (req, res) => {
             return res.status(404).json({ error: 'Uno o mas usuarios no existen' });
         }
 
-        const bannedUsers = [...userMap.values()].filter((user) => user.is_banned);
+        const bannedUsers = [...userMap.values()].filter((user) => user.is_banned || isAdminAccount(user));
 
         if (bannedUsers.length > 0) {
             await client.query('ROLLBACK');
             return res.status(403).json({
-                error: 'No se puede registrar el gasto porque hay usuarios baneados',
+                error: 'No se puede registrar el gasto porque hay usuarios baneados o administradores',
                 banned_users: bannedUsers.map((user) => ({
                     id: user.id,
                     name: user.name
@@ -791,7 +872,7 @@ const registerPayment = async (req, res) => {
         await client.query('BEGIN');
 
         const usersResult = await client.query(
-            `SELECT id, wallet_balance
+            `SELECT id, wallet_balance, role, is_banned
              FROM users
              WHERE id = ANY($1::uuid[])
              FOR UPDATE`,
@@ -801,6 +882,19 @@ const registerPayment = async (req, res) => {
         if (usersResult.rows.length !== 2) {
             await client.query('ROLLBACK');
             return res.status(404).json({ error: 'Uno o ambos usuarios no existen' });
+        }
+
+        const senderState = await getUserAccountState(client, req.user.id);
+        const receiverState = await getUserAccountState(client, toUser);
+
+        if (senderState.role === 'admin' || receiverState.role === 'admin') {
+            await client.query('ROLLBACK');
+            return res.status(403).json({ error: 'La cuenta administradora no puede participar en pagos manuales' });
+        }
+
+        if (senderState.is_banned || receiverState.is_banned) {
+            await client.query('ROLLBACK');
+            return res.status(403).json({ error: 'No se pueden registrar pagos con usuarios baneados' });
         }
 
         if (groupId) {
@@ -835,14 +929,53 @@ const registerPayment = async (req, res) => {
                 throw error;
             }
 
-            settlement = await settleLoan(client, {
-                loanId,
-                groupId,
-                borrowerId: req.user.id,
-                lenderId: toUser,
-                amount: paymentAmount
-            });
-            resolvedLoanId = settlement.loan_id;
+            try {
+                settlement = await settleLoan(client, {
+                    loanId,
+                    groupId,
+                    borrowerId: req.user.id,
+                    lenderId: toUser,
+                    amount: paymentAmount
+                });
+                resolvedLoanId = settlement.loan_id;
+            } catch (loanError) {
+                if (loanError.statusCode !== 400) {
+                    throw loanError;
+                }
+
+                const intermediaryResult = await client.query(
+                    `SELECT creditor_id
+                     FROM balances
+                     WHERE debtor_id = $1
+                       AND group_id IS NOT DISTINCT FROM $2
+                     ORDER BY amount DESC, updated_at DESC`,
+                    [req.user.id, groupId]
+                );
+
+                let indirectSettlement = null;
+                for (const row of intermediaryResult.rows) {
+                    try {
+                        indirectSettlement = await settleIndirectBalance(client, {
+                            groupId,
+                            fromUserId: req.user.id,
+                            intermediaryUserId: row.creditor_id,
+                            finalUserId: toUser,
+                            amount: paymentAmount
+                        });
+                        break;
+                    } catch (indirectError) {
+                        if (indirectError.statusCode !== 400) {
+                            throw indirectError;
+                        }
+                    }
+                }
+
+                if (!indirectSettlement) {
+                    throw loanError;
+                }
+
+                settlement = indirectSettlement;
+            }
         }
 
         await client.query(
@@ -874,9 +1007,13 @@ const registerPayment = async (req, res) => {
             [
                 req.user.id,
                 paymentAmount,
-                `Pago enviado a ${toUser}`,
+                settlement?.indirect
+                    ? `Pago enviado a ${toUser} por cadena de deuda`
+                    : `Pago enviado a ${toUser}`,
                 toUser,
-                `Pago recibido de ${req.user.id}`
+                settlement?.indirect
+                    ? `Pago recibido de ${req.user.id} por cadena de deuda`
+                    : `Pago recibido de ${req.user.id}`
             ]
         );
 

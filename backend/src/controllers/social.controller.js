@@ -1,4 +1,5 @@
 const pool = require('../db/connection');
+const { getUserAccountState, isAdminAccount } = require('../utils/account-state');
 
 const normalizeFriendPair = (firstUserId, secondUserId) => (
     [firstUserId, secondUserId].sort((a, b) => a.localeCompare(b))
@@ -81,8 +82,14 @@ const sendFriendRequest = async (req, res) => {
 
         await client.query('BEGIN');
 
+        const senderState = await getUserAccountState(client, req.user.id);
+        if (senderState.role === 'admin') {
+            await client.query('ROLLBACK');
+            return res.status(403).json({ error: 'La cuenta administradora no puede tener amigos' });
+        }
+
         const receiverResult = await client.query(
-            `SELECT id, is_banned
+            `SELECT id, is_banned, role
              FROM users
              WHERE id = $1`,
             [receiverId]
@@ -91,6 +98,11 @@ const sendFriendRequest = async (req, res) => {
         if (receiverResult.rows.length === 0) {
             await client.query('ROLLBACK');
             return res.status(404).json({ error: 'El usuario no existe' });
+        }
+
+        if (isAdminAccount(receiverResult.rows[0])) {
+            await client.query('ROLLBACK');
+            return res.status(403).json({ error: 'No puedes enviar solicitudes de amistad al administrador' });
         }
 
         if (receiverResult.rows[0].is_banned) {
@@ -271,6 +283,12 @@ const respondFriendRequest = async (req, res) => {
         }
 
         const request = requestResult.rows[0];
+
+        const receiverState = await getUserAccountState(client, req.user.id);
+        if (receiverState.role === 'admin') {
+            await client.query('ROLLBACK');
+            return res.status(403).json({ error: 'La cuenta administradora no puede tener amigos' });
+        }
 
         if (request.receiver_id !== req.user.id) {
             await client.query('ROLLBACK');

@@ -39,6 +39,7 @@
 
             <nav class="sidebar-nav">
                 <button class="nav-link active" data-view="inicio" type="button">Inicio</button>
+                <button class="nav-link" data-view="movimientos" type="button">Movimientos</button>
                 <button class="nav-link" data-view="amigos" type="button">Amigos</button>
                 <button class="nav-link" data-view="grupos" type="button">Grupos</button>
                 <button class="nav-link" data-view="usuarios" type="button">Usuarios</button>
@@ -104,7 +105,7 @@
                             <h3>Consignar dinero</h3>
                         </div>
                         <form id="deposit-form" class="stack">
-                            <input type="number" id="deposit-amount" placeholder="Monto a consignar" min="1000" step="1000" required>
+                            <input type="text" id="deposit-amount" inputmode="numeric" placeholder="Monto a consignar" required>
                             <button type="submit">Consignar dinero</button>
                         </form>
                     </article>
@@ -114,29 +115,19 @@
                             <h3>Retirar dinero</h3>
                         </div>
                         <form id="withdraw-form" class="stack">
-                            <input type="number" id="withdraw-amount" placeholder="Monto a retirar" min="1000" step="1000" required>
+                            <input type="text" id="withdraw-amount" inputmode="numeric" placeholder="Monto a retirar" required>
                             <button type="submit">Retirar dinero</button>
                         </form>
                     </article>
                 </div>
 
-                <div class="content-grid">
-                    <article class="panel-card">
-                        <div class="panel-card-header">
-                            <h3>Mis deudas</h3>
-                            <button id="reload-balances-btn" class="ghost" type="button">Recargar</button>
-                        </div>
-                        <div id="balances-list" class="stack-list"></div>
-                    </article>
-
-                    <article class="panel-card">
-                        <div class="panel-card-header">
-                            <h3>Prestamos recientes</h3>
-                            <button id="reload-loans-btn" class="ghost" type="button">Recargar</button>
-                        </div>
-                        <div id="loans-summary-list" class="stack-list"></div>
-                    </article>
-                </div>
+                <article class="panel-card">
+                    <div class="panel-card-header">
+                        <h3>Mis deudas</h3>
+                        <button id="reload-balances-btn" class="ghost" type="button">Recargar</button>
+                    </div>
+                    <div id="balances-list" class="stack-list"></div>
+                </article>
 
                 <article class="panel-card">
                     <div class="panel-card-header">
@@ -166,31 +157,33 @@
                 </article>
             </section>
 
+            <section id="view-movimientos" class="dashboard-view">
+                <article class="panel-card">
+                    <div class="panel-card-header">
+                        <h3>Mis movimientos</h3>
+                        <button id="reload-movements-btn" class="ghost" type="button">Recargar</button>
+                    </div>
+                    <div id="movements-list" class="stack-list"></div>
+                </article>
+            </section>
+
             <section id="view-grupos" class="dashboard-view">
                 <article class="panel-card">
                     <div class="panel-card-header">
                         <div>
                             <h3>Buscar grupos</h3>
                         </div>
-                        <form id="group-search-form" class="inline-search">
-                            <input id="group-search" type="text" placeholder="Buscar grupos por nombre">
-                            <button type="submit">Buscar</button>
-                        </form>
+                        <div class="card-actions">
+                            <form id="group-search-form" class="inline-search">
+                                <input id="group-search" type="text" placeholder="Buscar grupos por nombre">
+                                <button type="submit">Buscar</button>
+                            </form>
+                            <button id="show-create-group-btn" type="button">Crear grupo</button>
+                        </div>
                     </div>
                 </article>
 
                 <div class="content-grid">
-                    <article class="panel-card">
-                        <div class="panel-card-header">
-                            <h3>Mis grupos</h3>
-                            <div class="card-actions">
-                                <button id="reload-groups-btn" class="ghost" type="button">Recargar</button>
-                                <button id="show-create-group-btn" type="button">Crear grupo</button>
-                            </div>
-                        </div>
-                        <div id="groups-list" class="stack-list"></div>
-                    </article>
-
                     <article id="public-groups-card" class="panel-card">
                         <div class="panel-card-header">
                             <h3>Grupos publicos</h3>
@@ -224,7 +217,9 @@
                     </div>
                     <div id="group-invitations-list" class="stack-list"></div>
                 </article>
+            </section>
 
+            <section id="view-grupo" class="dashboard-view">
                 <article id="group-detail-card" class="panel-card hidden">
                 <div class="panel-card-header">
                     <h3>Detalle del grupo</h3>
@@ -257,6 +252,18 @@
                         </form>
                     </div>
                 </div>
+                </article>
+
+                <article id="group-invite-form-card" class="panel-card hidden">
+                    <div class="panel-card-header">
+                        <h3>Invitar persona al grupo</h3>
+                    </div>
+                    <form id="group-invite-form" class="stack">
+                        <input type="text" id="group-invite-user-name" list="group-invite-users" placeholder="Escribe el nombre o selecciona una persona" required>
+                        <datalist id="group-invite-users"></datalist>
+                        <input type="hidden" id="group-invite-user-id">
+                        <button type="submit">Enviar invitacion</button>
+                    </form>
                 </article>
 
                 <article id="group-loan-form-card" class="panel-card hidden">
@@ -332,7 +339,7 @@
                         </div>
                         <form id="expense-form" class="stack">
                             <input type="text" id="expense-description" placeholder="Descripcion" required>
-                            <input type="number" id="expense-amount" placeholder="Monto total" min="0" step="0.01" required>
+                            <input type="text" id="expense-amount" inputmode="numeric" placeholder="Monto total" required>
                             <select id="expense-group"><option value="">Sin grupo</option></select>
                             <select id="expense-paid-by" required></select>
                             <select id="expense-split-type">

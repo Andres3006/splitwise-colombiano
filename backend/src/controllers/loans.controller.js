@@ -1,7 +1,9 @@
 const pool = require('../db/connection');
+const { assertUserCanUseRestrictedFeatures, getUserAccountState, isAdminAccount } = require('../utils/account-state');
 
 const roundToTwo = (value) => Number(Number(value).toFixed(2));
 const MIN_LOAN_AMOUNT = 1000;
+const MAX_LOAN_AMOUNT = 50000;
 const MAX_LOAN_TERM_DAYS = 15;
 
 const ensureGroupMembership = async (client, groupId, userIds) => {
@@ -15,6 +17,87 @@ const ensureGroupMembership = async (client, groupId, userIds) => {
     );
 
     return membersResult.rows.length === userIds.length;
+};
+
+const getAvailableBalanceOffsetAmount = async (client, loan) => {
+    const reverseBalanceResult = await client.query(
+        `SELECT id, amount
+         FROM balances
+         WHERE debtor_id = $1
+           AND creditor_id = $2
+           AND group_id IS NOT DISTINCT FROM $3
+         LIMIT 1
+         FOR UPDATE`,
+        [loan.lender_id, loan.borrower_id, loan.group_id || null]
+    );
+
+    if (reverseBalanceResult.rows.length === 0) {
+        return 0;
+    }
+
+    const currentBalanceAmount = roundToTwo(Number(reverseBalanceResult.rows[0].amount || 0));
+    const loanTotalAmount = roundToTwo(Number(loan.total_amount || 0));
+    return roundToTwo(Math.min(currentBalanceAmount, loanTotalAmount));
+};
+
+const applyBalanceOffsetToLoan = async (client, loan) => {
+    const reverseBalanceResult = await client.query(
+        `SELECT id, amount
+         FROM balances
+         WHERE debtor_id = $1
+           AND creditor_id = $2
+           AND group_id IS NOT DISTINCT FROM $3
+         LIMIT 1
+         FOR UPDATE`,
+        [loan.lender_id, loan.borrower_id, loan.group_id || null]
+    );
+
+    if (reverseBalanceResult.rows.length === 0) {
+        return { offsetAmount: 0 };
+    }
+
+    const currentBalanceAmount = roundToTwo(Number(reverseBalanceResult.rows[0].amount || 0));
+    const loanTotalAmount = roundToTwo(Number(loan.total_amount || 0));
+    const offsetAmount = roundToTwo(Math.min(currentBalanceAmount, loanTotalAmount));
+
+    if (offsetAmount <= 0) {
+        return { offsetAmount: 0 };
+    }
+
+    const remainingBalance = roundToTwo(currentBalanceAmount - offsetAmount);
+
+    if (remainingBalance > 0) {
+        await client.query(
+            `UPDATE balances
+             SET amount = $1,
+                 updated_at = CURRENT_TIMESTAMP
+             WHERE id = $2`,
+            [remainingBalance, reverseBalanceResult.rows[0].id]
+        );
+    } else {
+        await client.query(
+            `DELETE FROM balances
+             WHERE id = $1`,
+            [reverseBalanceResult.rows[0].id]
+        );
+    }
+
+    await client.query(
+        `INSERT INTO payments (loan_id, from_user, to_user, amount)
+         VALUES ($1, $2, $3, $4)`,
+        [loan.id, loan.borrower_id, loan.lender_id, offsetAmount]
+    );
+
+    if (offsetAmount >= loanTotalAmount) {
+        await client.query(
+            `UPDATE loans
+             SET status = 'paid'
+             WHERE id = $1`,
+            [loan.id]
+        );
+    }
+
+    return { offsetAmount };
 };
 
 const createLoan = async (req, res) => {
@@ -42,6 +125,12 @@ const createLoan = async (req, res) => {
         if (!Number.isFinite(normalizedAmount) || normalizedAmount < MIN_LOAN_AMOUNT) {
             return res.status(400).json({
                 error: `El monto minimo para solicitar un prestamo es de ${MIN_LOAN_AMOUNT.toLocaleString('es-CO')} pesos`
+            });
+        }
+
+        if (normalizedAmount > MAX_LOAN_AMOUNT) {
+            return res.status(400).json({
+                error: `El monto maximo para solicitar un prestamo es de ${MAX_LOAN_AMOUNT.toLocaleString('es-CO')} pesos`
             });
         }
 
@@ -74,8 +163,12 @@ const createLoan = async (req, res) => {
 
         await client.query('BEGIN');
 
+        await assertUserCanUseRestrictedFeatures(client, req.user.id, {
+            errorPrefix: 'No puedes pedir prestamos'
+        });
+
         const usersResult = await client.query(
-            `SELECT id, name, is_banned
+            `SELECT id, name, is_banned, role
              FROM users
              WHERE id = ANY($1::uuid[])`,
             [[req.user.id, lenderId]]
@@ -86,9 +179,20 @@ const createLoan = async (req, res) => {
             return res.status(404).json({ error: 'Uno o ambos usuarios no existen' });
         }
 
-        if (usersResult.rows.some((user) => user.is_banned)) {
+        if (usersResult.rows.some((user) => user.is_banned || isAdminAccount(user))) {
             await client.query('ROLLBACK');
-            return res.status(403).json({ error: 'No se pueden crear prestamos con usuarios baneados' });
+            return res.status(403).json({ error: 'No se pueden crear prestamos con usuarios baneados o administradores' });
+        }
+
+        const lenderAccount = await getUserAccountState(client, lenderId);
+        if (lenderAccount.role === 'admin') {
+            await client.query('ROLLBACK');
+            return res.status(403).json({ error: 'No puedes pedirle prestamos a la cuenta administradora' });
+        }
+
+        if (lenderAccount.is_banned) {
+            await client.query('ROLLBACK');
+            return res.status(403).json({ error: 'No puedes pedirle prestamos a un usuario baneado' });
         }
 
         const isValidMembership = await ensureGroupMembership(client, groupId, [req.user.id, lenderId]);
@@ -130,6 +234,36 @@ const createLoan = async (req, res) => {
         }
 
         const totalAmount = roundToTwo(normalizedAmount * 1.1);
+
+        const outstandingDebtResult = await client.query(
+            `SELECT COALESCE(SUM(remaining_amount), 0) AS total_outstanding
+             FROM (
+                SELECT
+                    GREATEST(l.amount - COALESCE(SUM(p.amount), 0), 0) AS remaining_amount
+                FROM loans l
+                LEFT JOIN payments p ON p.loan_id = l.id
+                WHERE l.borrower_id = $1
+                  AND l.status IN ('pending', 'active')
+                GROUP BY l.id, l.amount
+             ) AS loan_balances`,
+            [req.user.id]
+        );
+
+        const currentOutstandingDebt = Number(outstandingDebtResult.rows[0]?.total_outstanding || 0);
+
+        if (currentOutstandingDebt >= MAX_LOAN_AMOUNT) {
+            await client.query('ROLLBACK');
+            return res.status(409).json({
+                error: `Ya alcanzaste el limite de deuda en prestamos de ${MAX_LOAN_AMOUNT.toLocaleString('es-CO')} pesos`
+            });
+        }
+
+        if (roundToTwo(currentOutstandingDebt + normalizedAmount) > MAX_LOAN_AMOUNT) {
+            await client.query('ROLLBACK');
+            return res.status(409).json({
+                error: `No puedes superar ${MAX_LOAN_AMOUNT.toLocaleString('es-CO')} pesos entre todos los prestamos solicitados`
+            });
+        }
 
         const loanResult = await client.query(
             `INSERT INTO loans (
@@ -221,7 +355,7 @@ const respondLoan = async (req, res) => {
         await client.query('BEGIN');
 
         const loanResult = await client.query(
-            `SELECT id, lender_id, borrower_id, group_id, status, due_date, amount
+            `SELECT id, lender_id, borrower_id, group_id, status, due_date, amount, total_amount
              FROM loans
              WHERE id = $1
              LIMIT 1`,
@@ -245,7 +379,20 @@ const respondLoan = async (req, res) => {
             return res.status(409).json({ error: 'La solicitud ya no esta pendiente' });
         }
 
+        let nextStatus = action === 'accept' ? 'active' : 'rejected';
+
         if (action === 'accept') {
+            const lenderAccount = await getUserAccountState(client, req.user.id);
+            if (lenderAccount.role === 'admin') {
+                await client.query('ROLLBACK');
+                return res.status(403).json({ error: 'La cuenta administradora no puede prestar dinero' });
+            }
+
+            if (lenderAccount.is_banned) {
+                await client.query('ROLLBACK');
+                return res.status(403).json({ error: 'No puedes prestar dinero con una cuenta baneada' });
+            }
+
             const walletUsersResult = await client.query(
                 `SELECT id, wallet_balance
                  FROM users
@@ -256,44 +403,67 @@ const respondLoan = async (req, res) => {
 
             const lender = walletUsersResult.rows.find((user) => user.id === loan.lender_id);
             const loanAmount = roundToTwo(Number(loan.amount));
+            const previewOffsetAmount = await getAvailableBalanceOffsetAmount(client, loan);
+            const cashDisbursementAmount = roundToTwo(Math.max(loanAmount - previewOffsetAmount, 0));
 
-            if (Number(lender.wallet_balance) < loanAmount) {
+            if (Number(lender.wallet_balance) < cashDisbursementAmount) {
                 await client.query('ROLLBACK');
                 return res.status(400).json({
                     error: 'No tienes saldo disponible suficiente para prestar ese dinero'
                 });
             }
 
-            await client.query(
-                `UPDATE users
-                 SET wallet_balance = wallet_balance - $1
-                 WHERE id = $2`,
-                [loanAmount, loan.lender_id]
-            );
+            if (cashDisbursementAmount > 0) {
+                await client.query(
+                    `UPDATE users
+                     SET wallet_balance = wallet_balance - $1
+                     WHERE id = $2`,
+                    [cashDisbursementAmount, loan.lender_id]
+                );
 
-            await client.query(
-                `UPDATE users
-                 SET wallet_balance = wallet_balance + $1
-                 WHERE id = $2`,
-                [loanAmount, loan.borrower_id]
-            );
+                await client.query(
+                    `UPDATE users
+                     SET wallet_balance = wallet_balance + $1
+                     WHERE id = $2`,
+                    [cashDisbursementAmount, loan.borrower_id]
+                );
 
-            await client.query(
-                `INSERT INTO wallet_transactions (user_id, transaction_type, amount, reference)
-                 VALUES
-                    ($1, 'loan_disbursement_out', $2, $3),
-                    ($4, 'loan_disbursement_in', $2, $5)`,
-                [
-                    loan.lender_id,
-                    loanAmount,
-                    `Prestamo entregado a ${loan.borrower_id}`,
-                    loan.borrower_id,
-                    `Prestamo recibido de ${loan.lender_id}`
-                ]
-            );
+                await client.query(
+                    `INSERT INTO wallet_transactions (user_id, transaction_type, amount, reference)
+                     VALUES
+                        ($1, 'loan_disbursement_out', $2, $3),
+                        ($4, 'loan_disbursement_in', $2, $5)`,
+                    [
+                        loan.lender_id,
+                        cashDisbursementAmount,
+                        `Prestamo entregado a ${loan.borrower_id}`,
+                        loan.borrower_id,
+                        `Prestamo recibido de ${loan.lender_id}`
+                    ]
+                );
+            }
+
+            const offsetResult = await applyBalanceOffsetToLoan(client, loan);
+            if (offsetResult.offsetAmount > 0) {
+                await client.query(
+                    `INSERT INTO wallet_transactions (user_id, transaction_type, amount, reference)
+                     VALUES
+                        ($1, 'loan_balance_offset', $2, $3),
+                        ($4, 'loan_balance_offset', $2, $5)`,
+                    [
+                        loan.lender_id,
+                        offsetResult.offsetAmount,
+                        `Cruce de deuda previo con el prestamo ${loan.id}`,
+                        loan.borrower_id,
+                        `Cruce de deuda previo con el prestamo ${loan.id}`
+                    ]
+                );
+
+                if (roundToTwo(offsetResult.offsetAmount) >= roundToTwo(Number(loan.total_amount || 0))) {
+                    nextStatus = 'paid';
+                }
+            }
         }
-
-        const nextStatus = action === 'accept' ? 'active' : 'rejected';
 
         const updatedLoan = await client.query(
             `UPDATE loans

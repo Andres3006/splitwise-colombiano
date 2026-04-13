@@ -1,4 +1,5 @@
 const pool = require('../db/connection');
+const { assertUserCanUseRestrictedFeatures, isAdminAccount } = require('../utils/account-state');
 
 const FIXED_GROUP_MEMBERS_LIMIT = 15;
 
@@ -107,8 +108,12 @@ const createGroup = async (req, res) => {
 
         await client.query('BEGIN');
 
+        await assertUserCanUseRestrictedFeatures(client, req.user.id, {
+            errorPrefix: 'No puedes crear grupos'
+        });
+
         const usersResult = await client.query(
-            `SELECT id, name, is_banned
+            `SELECT id, name, is_banned, role
              FROM users
              WHERE id = ANY($1::uuid[])`,
             [memberIds]
@@ -119,12 +124,12 @@ const createGroup = async (req, res) => {
             return res.status(404).json({ error: 'Uno o mas usuarios no existen' });
         }
 
-        const bannedUsers = usersResult.rows.filter((user) => user.is_banned);
+        const bannedUsers = usersResult.rows.filter((user) => user.is_banned || isAdminAccount(user));
 
         if (bannedUsers.length > 0) {
             await client.query('ROLLBACK');
             return res.status(403).json({
-                error: 'No se puede crear el grupo con usuarios baneados',
+                error: 'No se puede crear el grupo con usuarios baneados o administradores',
                 banned_users: bannedUsers.map((user) => ({
                     id: user.id,
                     name: user.name
@@ -161,7 +166,7 @@ const createGroup = async (req, res) => {
         });
     } catch (error) {
         await client.query('ROLLBACK');
-        return res.status(500).json({ error: error.message });
+        return res.status(error.statusCode || 500).json({ error: error.message });
     } finally {
         client.release();
     }
@@ -179,6 +184,10 @@ const addGroupMember = async (req, res) => {
         }
 
         await client.query('BEGIN');
+
+        await assertUserCanUseRestrictedFeatures(client, req.user.id, {
+            errorPrefix: 'No puedes agregar miembros'
+        });
 
         const membershipResult = await client.query(
             `SELECT role
@@ -203,7 +212,7 @@ const addGroupMember = async (req, res) => {
         }
 
         const userResult = await client.query(
-            `SELECT id, name, is_banned
+            `SELECT id, name, is_banned, role
              FROM users
              WHERE id = $1`,
             [userId]
@@ -214,10 +223,14 @@ const addGroupMember = async (req, res) => {
             return res.status(404).json({ error: 'El usuario no existe' });
         }
 
-        if (userResult.rows[0].is_banned) {
+        if (userResult.rows[0].is_banned || isAdminAccount(userResult.rows[0])) {
             await client.query('ROLLBACK');
-            return res.status(403).json({ error: 'No se puede agregar un usuario baneado' });
+            return res.status(403).json({ error: 'No se puede agregar un usuario baneado o administrador' });
         }
+
+        await assertUserCanUseRestrictedFeatures(client, userId, {
+            errorPrefix: 'No se puede agregar este usuario'
+        });
 
         const activeMemberResult = await client.query(
             `SELECT id
@@ -316,7 +329,7 @@ const getMyGroups = async (req, res) => {
 
         return res.json({ groups: result.rows });
     } catch (error) {
-        return res.status(500).json({ error: error.message });
+        return res.status(error.statusCode || 500).json({ error: error.message });
     }
 };
 
@@ -364,7 +377,7 @@ const getGroupDetails = async (req, res) => {
             members: membersResult.rows
         });
     } catch (error) {
-        return res.status(500).json({ error: error.message });
+        return res.status(error.statusCode || 500).json({ error: error.message });
     }
 };
 
@@ -409,7 +422,7 @@ const getPublicGroups = async (req, res) => {
 
         return res.json({ groups: result.rows });
     } catch (error) {
-        return res.status(500).json({ error: error.message });
+        return res.status(error.statusCode || 500).json({ error: error.message });
     }
 };
 
@@ -420,6 +433,10 @@ const joinPublicGroup = async (req, res) => {
         const { groupId } = req.params;
 
         await client.query('BEGIN');
+
+        await assertUserCanUseRestrictedFeatures(client, req.user.id, {
+            errorPrefix: 'No puedes unirte a grupos'
+        });
 
         const group = await getGroupCapacity(client, groupId);
 
@@ -508,6 +525,23 @@ const inviteToGroup = async (req, res) => {
 
         await client.query('BEGIN');
 
+        await assertUserCanUseRestrictedFeatures(client, req.user.id, {
+            errorPrefix: 'No puedes invitar personas a grupos'
+        });
+
+        const groupResult = await client.query(
+            `SELECT id, is_private
+             FROM groups
+             WHERE id = $1
+             LIMIT 1`,
+            [groupId]
+        );
+
+        if (groupResult.rows.length === 0) {
+            await client.query('ROLLBACK');
+            return res.status(404).json({ error: 'El grupo no existe' });
+        }
+
         const membershipResult = await client.query(
             `SELECT role
              FROM group_members
@@ -523,15 +557,18 @@ const inviteToGroup = async (req, res) => {
             return res.status(403).json({ error: 'No perteneces a este grupo' });
         }
 
-        if (!['owner', 'admin'].includes(membershipResult.rows[0].role)) {
+        const group = groupResult.rows[0];
+        const canInvite = !group.is_private || ['owner', 'admin'].includes(membershipResult.rows[0].role);
+
+        if (!canInvite) {
             await client.query('ROLLBACK');
             return res.status(403).json({
-                error: 'Solo un owner o admin puede invitar usuarios'
+                error: 'En grupos privados solo un propietario o administrador puede invitar usuarios'
             });
         }
 
         const userResult = await client.query(
-            `SELECT id, is_banned
+            `SELECT id, is_banned, role
              FROM users
              WHERE id = $1`,
             [invitedUserId]
@@ -542,10 +579,14 @@ const inviteToGroup = async (req, res) => {
             return res.status(404).json({ error: 'El usuario invitado no existe' });
         }
 
-        if (userResult.rows[0].is_banned) {
+        if (userResult.rows[0].is_banned || isAdminAccount(userResult.rows[0])) {
             await client.query('ROLLBACK');
-            return res.status(403).json({ error: 'No se puede invitar un usuario baneado' });
+            return res.status(403).json({ error: 'No se puede invitar un usuario baneado o administrador' });
         }
+
+        await assertUserCanUseRestrictedFeatures(client, invitedUserId, {
+            errorPrefix: 'No se puede invitar este usuario'
+        });
 
         const existingMemberResult = await client.query(
             `SELECT id
@@ -592,7 +633,7 @@ const inviteToGroup = async (req, res) => {
         });
     } catch (error) {
         await client.query('ROLLBACK');
-        return res.status(500).json({ error: error.message });
+        return res.status(error.statusCode || 500).json({ error: error.message });
     } finally {
         client.release();
     }
@@ -610,6 +651,10 @@ const respondToInvitation = async (req, res) => {
         }
 
         await client.query('BEGIN');
+
+        await assertUserCanUseRestrictedFeatures(client, req.user.id, {
+            errorPrefix: 'No puedes unirte a grupos'
+        });
 
         const invitationResult = await client.query(
             `SELECT id, group_id, invited_user_id, status
@@ -733,7 +778,7 @@ const getMyInvitations = async (req, res) => {
 
         return res.json({ invitations: result.rows });
     } catch (error) {
-        return res.status(500).json({ error: error.message });
+        return res.status(error.statusCode || 500).json({ error: error.message });
     }
 };
 
@@ -889,7 +934,7 @@ const getGroupMessages = async (req, res) => {
 
         return res.json({ messages: result.rows });
     } catch (error) {
-        return res.status(500).json({ error: error.message });
+        return res.status(error.statusCode || 500).json({ error: error.message });
     }
 };
 
@@ -921,7 +966,7 @@ const sendGroupMessage = async (req, res) => {
             group_message: result.rows[0]
         });
     } catch (error) {
-        return res.status(500).json({ error: error.message });
+        return res.status(error.statusCode || 500).json({ error: error.message });
     } finally {
         client.release();
     }
