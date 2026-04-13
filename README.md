@@ -5,7 +5,7 @@ Aplicacion web para gestionar gastos compartidos entre amigos y calcular automat
 
 ## Tecnologias usadas
 - Backend: Node.js + Express
-- Frontend: React
+- Frontend: React + Vite
 - Base de datos: PostgreSQL
 
 ## Instalacion
@@ -21,8 +21,10 @@ npm run dev
 ```bash
 cd frontend
 npm install
-npm start
+npm run dev
 ```
+
+El frontend anterior en HTML/CSS/JS puro se conservo en `frontend/legacy/`.
 
 ## Roles
 - Backend Developer: (tu nombre)
@@ -41,6 +43,20 @@ npm start
 3. Ejecuta `npm run dev`
 4. Prueba `GET http://localhost:3000/`
 5. Prueba `GET http://localhost:3000/db-test`
+
+## Desarrollo recomendado
+1. Levanta el backend en `http://localhost:3000`
+2. Levanta el frontend React con `npm run dev` en `frontend`
+3. Vite proxea `/api` al backend automaticamente
+
+## Produccion del frontend
+```bash
+cd frontend
+npm install
+npm run build
+```
+
+Despues de generar `frontend/dist`, el backend servira automaticamente ese build de React.
 
 ## Requests listas
 En `backend/test-server.http` tienes peticiones listas para probar:
