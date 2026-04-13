@@ -1,7 +1,8 @@
 const pool = require('../db/connection');
 const { assertUserCanUseRestrictedFeatures, isAdminAccount } = require('../utils/account-state');
 
-const FIXED_GROUP_MEMBERS_LIMIT = 15;
+const MIN_GROUP_MEMBERS_LIMIT = 3;
+const MAX_GROUP_MEMBERS_LIMIT = 15;
 
 const getGroupCapacity = async (client, groupId) => {
     const result = await client.query(
@@ -62,7 +63,7 @@ const createGroup = async (req, res) => {
             description,
             is_private: isPrivate = false,
             members = [],
-            max_members: maxMembers = FIXED_GROUP_MEMBERS_LIMIT
+            max_members: maxMembers = MAX_GROUP_MEMBERS_LIMIT
         } = req.body;
 
         const normalizedMaxMembers = Number(maxMembers);
@@ -92,9 +93,13 @@ const createGroup = async (req, res) => {
             }
         }
 
-        if (!Number.isInteger(normalizedMaxMembers) || normalizedMaxMembers !== FIXED_GROUP_MEMBERS_LIMIT) {
+        if (
+            !Number.isInteger(normalizedMaxMembers)
+            || normalizedMaxMembers < MIN_GROUP_MEMBERS_LIMIT
+            || normalizedMaxMembers > MAX_GROUP_MEMBERS_LIMIT
+        ) {
             return res.status(400).json({
-                error: `La cantidad maxima de personas debe ser ${FIXED_GROUP_MEMBERS_LIMIT}`
+                error: `La cantidad de personas debe estar entre ${MIN_GROUP_MEMBERS_LIMIT} y ${MAX_GROUP_MEMBERS_LIMIT}`
             });
         }
 
