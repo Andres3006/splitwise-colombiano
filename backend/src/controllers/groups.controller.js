@@ -254,36 +254,12 @@ const addGroupMember = async (req, res) => {
 
         await ensureGroupCapacity(client, groupId);
 
-        const inactiveMemberResult = await client.query(
-            `SELECT id
-             FROM group_members
-             WHERE group_id = $1
-               AND user_id = $2
-               AND left_at IS NOT NULL
-             ORDER BY joined_at DESC
-             LIMIT 1`,
-            [groupId, userId]
+        const memberResult = await client.query(
+            `INSERT INTO group_members (user_id, group_id, role)
+             VALUES ($1, $2, 'member')
+             RETURNING id, user_id, group_id, role, joined_at, left_at`,
+            [userId, groupId]
         );
-
-        let memberResult;
-        if (inactiveMemberResult.rows.length > 0) {
-            memberResult = await client.query(
-                `UPDATE group_members
-                 SET left_at = NULL,
-                     joined_at = CURRENT_TIMESTAMP,
-                     role = 'member'
-                 WHERE id = $1
-                 RETURNING id, user_id, group_id, role, joined_at, left_at`,
-                [inactiveMemberResult.rows[0].id]
-            );
-        } else {
-            memberResult = await client.query(
-                `INSERT INTO group_members (user_id, group_id, role)
-                 VALUES ($1, $2, 'member')
-                 RETURNING id, user_id, group_id, role, joined_at, left_at`,
-                [userId, groupId]
-            );
-        }
 
         await client.query('COMMIT');
 
@@ -367,7 +343,8 @@ const getGroupDetails = async (req, res) => {
             return res.status(404).json({ error: 'El grupo no existe' });
         }
 
-        const membersResult = await pool.query(
+        const [membersResult, memberHistoryResult] = await Promise.all([
+            pool.query(
             `SELECT gm.user_id, u.name, u.email, gm.role, gm.joined_at
              FROM group_members gm
              JOIN users u ON u.id = gm.user_id
@@ -375,11 +352,28 @@ const getGroupDetails = async (req, res) => {
                AND gm.left_at IS NULL
              ORDER BY gm.joined_at ASC`,
             [groupId]
-        );
+            ),
+            pool.query(
+            `SELECT
+                gm.id,
+                gm.user_id,
+                u.name,
+                u.email,
+                gm.role,
+                gm.joined_at,
+                gm.left_at
+             FROM group_members gm
+             JOIN users u ON u.id = gm.user_id
+             WHERE gm.group_id = $1
+             ORDER BY gm.joined_at ASC`,
+            [groupId]
+            )
+        ]);
 
         return res.json({
             group: groupResult.rows[0],
-            members: membersResult.rows
+            members: membersResult.rows,
+            member_history: memberHistoryResult.rows
         });
     } catch (error) {
         return res.status(error.statusCode || 500).json({ error: error.message });
@@ -472,36 +466,12 @@ const joinPublicGroup = async (req, res) => {
 
         await ensureGroupCapacity(client, groupId);
 
-        const inactiveMemberResult = await client.query(
-            `SELECT id
-             FROM group_members
-             WHERE group_id = $1
-               AND user_id = $2
-               AND left_at IS NOT NULL
-             ORDER BY joined_at DESC
-             LIMIT 1`,
-            [groupId, req.user.id]
+        const memberResult = await client.query(
+            `INSERT INTO group_members (user_id, group_id, role)
+             VALUES ($1, $2, 'member')
+             RETURNING id, user_id, group_id, role, joined_at, left_at`,
+            [req.user.id, groupId]
         );
-
-        let memberResult;
-        if (inactiveMemberResult.rows.length > 0) {
-            memberResult = await client.query(
-                `UPDATE group_members
-                 SET left_at = NULL,
-                     joined_at = CURRENT_TIMESTAMP,
-                     role = 'member'
-                 WHERE id = $1
-                 RETURNING id, user_id, group_id, role, joined_at, left_at`,
-                [inactiveMemberResult.rows[0].id]
-            );
-        } else {
-            memberResult = await client.query(
-                `INSERT INTO group_members (user_id, group_id, role)
-                 VALUES ($1, $2, 'member')
-                 RETURNING id, user_id, group_id, role, joined_at, left_at`,
-                [req.user.id, groupId]
-            );
-        }
 
         await client.query('COMMIT');
 
@@ -711,37 +681,13 @@ const respondToInvitation = async (req, res) => {
             );
 
             if (activeMemberResult.rows.length === 0) {
-                const inactiveMemberResult = await client.query(
-                    `SELECT id
-                     FROM group_members
-                     WHERE group_id = $1
-                       AND user_id = $2
-                       AND left_at IS NOT NULL
-                     ORDER BY joined_at DESC
-                     LIMIT 1`,
-                    [invitation.group_id, req.user.id]
+                const memberResult = await client.query(
+                    `INSERT INTO group_members (user_id, group_id, role)
+                     VALUES ($1, $2, 'member')
+                     RETURNING id, user_id, group_id, role, joined_at, left_at`,
+                    [req.user.id, invitation.group_id]
                 );
-
-                if (inactiveMemberResult.rows.length > 0) {
-                    const memberResult = await client.query(
-                        `UPDATE group_members
-                         SET left_at = NULL,
-                             joined_at = CURRENT_TIMESTAMP,
-                             role = 'member'
-                         WHERE id = $1
-                         RETURNING id, user_id, group_id, role, joined_at, left_at`,
-                        [inactiveMemberResult.rows[0].id]
-                    );
-                    member = memberResult.rows[0];
-                } else {
-                    const memberResult = await client.query(
-                        `INSERT INTO group_members (user_id, group_id, role)
-                         VALUES ($1, $2, 'member')
-                         RETURNING id, user_id, group_id, role, joined_at, left_at`,
-                        [req.user.id, invitation.group_id]
-                    );
-                    member = memberResult.rows[0];
-                }
+                member = memberResult.rows[0];
             }
         }
 

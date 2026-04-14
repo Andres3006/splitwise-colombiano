@@ -140,6 +140,24 @@ const ensureSplitwiseSchema = async () => {
         ALTER TABLE loans
         ADD COLUMN IF NOT EXISTS description TEXT;
 
+        ALTER TABLE payments
+        ADD COLUMN IF NOT EXISTS group_id UUID REFERENCES groups(id) ON DELETE SET NULL;
+
+        ALTER TABLE payments
+        ADD COLUMN IF NOT EXISTS settlement_type VARCHAR(30) NOT NULL DEFAULT 'direct';
+
+        ALTER TABLE payments
+        ADD COLUMN IF NOT EXISTS intermediary_user_id UUID REFERENCES users(id) ON DELETE SET NULL;
+
+        CREATE INDEX IF NOT EXISTS idx_payments_group_id
+        ON payments (group_id);
+
+        CREATE INDEX IF NOT EXISTS idx_payments_from_user
+        ON payments (from_user);
+
+        CREATE INDEX IF NOT EXISTS idx_payments_to_user
+        ON payments (to_user);
+
         ALTER TABLE group_invitations
         DROP CONSTRAINT IF EXISTS group_invitations_group_id_fkey;
 

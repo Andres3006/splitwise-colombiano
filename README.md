@@ -5,7 +5,7 @@ Aplicacion web para gestionar gastos compartidos entre amigos y calcular automat
 
 ## Tecnologias usadas
 - Backend: Node.js + Express
-- Frontend: React
+- Frontend: React + Vite
 - Base de datos: PostgreSQL
 
 ## Instalacion
@@ -21,8 +21,17 @@ npm run dev
 ```bash
 cd frontend
 npm install
-npm start
+npm run dev
 ```
+
+### Build de frontend para produccion
+```bash
+cd frontend
+npm install
+npm run build
+```
+
+Despues de compilar, el backend servira automaticamente `frontend/dist`.
 
 ## Roles
 - Backend Developer: (tu nombre)

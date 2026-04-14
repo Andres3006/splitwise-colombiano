@@ -1,5 +1,7 @@
 const express = require('express');
 const path = require('path');
+const fs = require('fs');
+const cors = require('cors');
 
 const env = require('./config/env');
 const pool = require('./db/connection');
@@ -18,9 +20,10 @@ const socialRoutes = require('./routes/social.routes');
 const verifyToken = require('./middlewares/auth.middleware');
 
 const app = express();
+const frontendDistPath = path.join(__dirname, '..', '..', 'frontend', 'dist');
 
 app.use(express.json());
-app.use(express.static(path.join(__dirname, '..', '..', 'frontend')));
+app.use(cors());
 
 app.use('/api', testRoutes);
 app.use('/api/auth', authRoutes);
@@ -33,9 +36,9 @@ app.use('/api/loans', loansRoutes);
 app.use('/api/users', usersRoutes);
 app.use('/api/social', socialRoutes);
 
-app.get('/', (req, res) => {
-    res.sendFile(path.join(__dirname, '..', '..', 'frontend', 'index.html'));
-});
+if (fs.existsSync(frontendDistPath)) {
+    app.use(express.static(frontendDistPath));
+}
 
 app.get('/db-test', async (req, res) => {
     try {
@@ -68,6 +71,22 @@ app.get('/private', verifyToken, (req, res) => {
             res.status(500).json({ error: error.message });
         });
 });
+
+if (fs.existsSync(frontendDistPath)) {
+    app.get(/^\/(?!api|private|db-test).*/, (req, res) => {
+        res.sendFile(path.join(frontendDistPath, 'index.html'));
+    });
+
+    app.get('/', (req, res) => {
+        res.sendFile(path.join(frontendDistPath, 'index.html'));
+    });
+} else {
+    app.get('/', (req, res) => {
+        res.json({
+            message: 'Backend activo. Compila el frontend con "npm run build" dentro de frontend para servir la SPA.'
+        });
+    });
+}
 
 const startServer = async () => {
     try {

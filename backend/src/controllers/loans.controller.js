@@ -83,9 +83,16 @@ const applyBalanceOffsetToLoan = async (client, loan) => {
     }
 
     await client.query(
-        `INSERT INTO payments (loan_id, from_user, to_user, amount)
-         VALUES ($1, $2, $3, $4)`,
-        [loan.id, loan.borrower_id, loan.lender_id, offsetAmount]
+        `INSERT INTO payments (
+            loan_id,
+            group_id,
+            from_user,
+            to_user,
+            amount,
+            settlement_type
+        )
+         VALUES ($1, $2, $3, $4, $5, 'loan_offset')`,
+        [loan.id, loan.group_id || null, loan.borrower_id, loan.lender_id, offsetAmount]
     );
 
     if (offsetAmount >= loanTotalAmount) {
@@ -239,12 +246,12 @@ const createLoan = async (req, res) => {
             `SELECT COALESCE(SUM(remaining_amount), 0) AS total_outstanding
              FROM (
                 SELECT
-                    GREATEST(l.amount - COALESCE(SUM(p.amount), 0), 0) AS remaining_amount
+                    GREATEST(l.total_amount - COALESCE(SUM(p.amount), 0), 0) AS remaining_amount
                 FROM loans l
                 LEFT JOIN payments p ON p.loan_id = l.id
                 WHERE l.borrower_id = $1
                   AND l.status IN ('pending', 'active')
-                GROUP BY l.id, l.amount
+                GROUP BY l.id, l.total_amount
              ) AS loan_balances`,
             [req.user.id]
         );

@@ -1,0 +1,44 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer base {
+  html {
+    @apply bg-cream-50;
+  }
+
+  body {
+    @apply min-h-screen bg-paper font-body text-stone-800 antialiased;
+  }
+
+  * {
+    scrollbar-width: thin;
+    scrollbar-color: rgba(41, 97, 81, 0.3) transparent;
+  }
+}
+
+@layer components {
+  .panel {
+    @apply rounded-[28px] border border-forest-900/10 bg-white/80 shadow-panel backdrop-blur;
+  }
+
+  .panel-soft {
+    @apply rounded-3xl border border-white/60 bg-white/70 shadow-soft backdrop-blur;
+  }
+
+  .btn-primary {
+    @apply inline-flex items-center justify-center gap-2 rounded-2xl bg-forest-900 px-4 py-3 text-sm font-medium text-white transition hover:-translate-y-0.5 hover:bg-forest-800;
+  }
+
+  .btn-secondary {
+    @apply inline-flex items-center justify-center gap-2 rounded-2xl border border-forest-900/15 bg-white/70 px-4 py-3 text-sm font-medium text-forest-900 transition hover:-translate-y-0.5 hover:bg-white;
+  }
+
+  .input-base {
+    @apply w-full rounded-2xl border border-stone-200 bg-white/90 px-4 py-3 text-sm text-stone-800 outline-none transition placeholder:text-stone-400 focus:border-copper-500 focus:ring-4 focus:ring-copper-200/60;
+  }
+
+  .eyebrow {
+    @apply text-[11px] uppercase tracking-[0.28em] text-stone-500;
+  }
+}

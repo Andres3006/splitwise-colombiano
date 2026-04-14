@@ -147,11 +147,182 @@ const getBalancesForOptimization = async (userId, groupId = null) => {
     );
 };
 
+const getActiveLoansByUser = async (userId) => pool.query(
+    `SELECT
+        l.id,
+        l.group_id,
+        l.borrower_id,
+        borrower.name AS borrower_name,
+        l.lender_id,
+        lender.name AS lender_name,
+        l.total_amount,
+        COALESCE(SUM(p.amount), 0) AS total_paid,
+        GREATEST(l.total_amount - COALESCE(SUM(p.amount), 0), 0) AS remaining_amount,
+        l.due_date,
+        l.status,
+        l.created_at
+     FROM loans l
+     JOIN users borrower ON borrower.id = l.borrower_id
+     JOIN users lender ON lender.id = l.lender_id
+     LEFT JOIN payments p ON p.loan_id = l.id
+     WHERE l.status = 'active'
+       AND (l.borrower_id = $1 OR l.lender_id = $1)
+     GROUP BY l.id, borrower.name, lender.name
+     ORDER BY l.created_at DESC`,
+    [userId]
+);
+
+const getRelationshipPaymentHistory = async (userId) => pool.query(
+    `SELECT
+        p.id,
+        p.loan_id,
+        p.group_id,
+        p.settlement_type,
+        p.intermediary_user_id,
+        intermediary.name AS intermediary_user_name,
+        p.from_user,
+        sender.name AS from_user_name,
+        p.to_user,
+        receiver.name AS to_user_name,
+        p.amount,
+        p.created_at
+     FROM payments p
+     JOIN users sender ON sender.id = p.from_user
+     JOIN users receiver ON receiver.id = p.to_user
+     LEFT JOIN users intermediary ON intermediary.id = p.intermediary_user_id
+     WHERE p.from_user = $1
+        OR p.to_user = $1
+     ORDER BY p.created_at DESC`,
+    [userId]
+);
+
+const getOrCreateRelationship = (relationshipMap, counterpartId, counterpartName) => {
+    if (!relationshipMap.has(counterpartId)) {
+        relationshipMap.set(counterpartId, {
+            counterpart_id: counterpartId,
+            counterpart_name: counterpartName,
+            total_to_pay: 0,
+            total_to_receive: 0,
+            pending_balance_amount: 0,
+            pending_loan_amount: 0,
+            open_balances_count: 0,
+            open_loans_count: 0,
+            total_paid_out: 0,
+            total_paid_in: 0,
+            last_payment_at: null,
+            payment_history: []
+        });
+    }
+
+    return relationshipMap.get(counterpartId);
+};
+
+const buildRelationshipDashboard = async (userId) => {
+    const [balancesResult, loansResult, paymentsResult] = await Promise.all([
+        getBalancesByUser(userId),
+        getActiveLoansByUser(userId),
+        getRelationshipPaymentHistory(userId)
+    ]);
+
+    const relationshipMap = new Map();
+
+    for (const balance of balancesResult.rows) {
+        const amount = roundToTwo(Number(balance.amount || 0));
+        const isDebtor = balance.debtor_id === userId;
+        const counterpartId = isDebtor ? balance.creditor_id : balance.debtor_id;
+        const counterpartName = isDebtor ? balance.creditor_name : balance.debtor_name;
+        const relationship = getOrCreateRelationship(relationshipMap, counterpartId, counterpartName);
+
+        if (isDebtor) {
+            relationship.total_to_pay = roundToTwo(relationship.total_to_pay + amount);
+        } else {
+            relationship.total_to_receive = roundToTwo(relationship.total_to_receive + amount);
+        }
+
+        relationship.pending_balance_amount = roundToTwo(relationship.pending_balance_amount + amount);
+        relationship.open_balances_count += 1;
+    }
+
+    for (const loan of loansResult.rows) {
+        const remainingAmount = roundToTwo(Number(loan.remaining_amount || 0));
+        if (remainingAmount <= 0) {
+            continue;
+        }
+
+        const isBorrower = loan.borrower_id === userId;
+        const counterpartId = isBorrower ? loan.lender_id : loan.borrower_id;
+        const counterpartName = isBorrower ? loan.lender_name : loan.borrower_name;
+        const relationship = getOrCreateRelationship(relationshipMap, counterpartId, counterpartName);
+
+        if (isBorrower) {
+            relationship.total_to_pay = roundToTwo(relationship.total_to_pay + remainingAmount);
+        } else {
+            relationship.total_to_receive = roundToTwo(relationship.total_to_receive + remainingAmount);
+        }
+
+        relationship.pending_loan_amount = roundToTwo(relationship.pending_loan_amount + remainingAmount);
+        relationship.open_loans_count += 1;
+    }
+
+    for (const payment of paymentsResult.rows) {
+        const counterpartId = payment.from_user === userId ? payment.to_user : payment.from_user;
+        const counterpartName = payment.from_user === userId ? payment.to_user_name : payment.from_user_name;
+        const relationship = getOrCreateRelationship(relationshipMap, counterpartId, counterpartName);
+        const paymentAmount = roundToTwo(Number(payment.amount || 0));
+
+        if (payment.from_user === userId) {
+            relationship.total_paid_out = roundToTwo(relationship.total_paid_out + paymentAmount);
+        } else {
+            relationship.total_paid_in = roundToTwo(relationship.total_paid_in + paymentAmount);
+        }
+
+        if (!relationship.last_payment_at || new Date(payment.created_at) > new Date(relationship.last_payment_at)) {
+            relationship.last_payment_at = payment.created_at;
+        }
+
+        relationship.payment_history.push({
+            id: payment.id,
+            amount: paymentAmount,
+            created_at: payment.created_at,
+            direction: payment.from_user === userId ? 'out' : 'in',
+            group_id: payment.group_id,
+            loan_id: payment.loan_id,
+            settlement_type: payment.settlement_type,
+            intermediary_user_id: payment.intermediary_user_id,
+            intermediary_user_name: payment.intermediary_user_name,
+            from_user_id: payment.from_user,
+            from_user_name: payment.from_user_name,
+            to_user_id: payment.to_user,
+            to_user_name: payment.to_user_name
+        });
+    }
+
+    const relationships = [...relationshipMap.values()]
+        .map((relationship) => ({
+            ...relationship,
+            net_balance: roundToTwo(relationship.total_to_receive - relationship.total_to_pay),
+            payment_history: relationship.payment_history.slice(0, 10)
+        }))
+        .sort((left, right) => {
+            const leftWeight = Math.abs(left.net_balance) + left.total_to_pay + left.total_to_receive;
+            const rightWeight = Math.abs(right.net_balance) + right.total_to_pay + right.total_to_receive;
+            return rightWeight - leftWeight;
+        });
+
+    return {
+        relationships,
+        payments: paymentsResult.rows
+    };
+};
+
 const optimizeBalances = (balances) => {
     const netMap = new Map();
+    const userMap = new Map();
 
     for (const balance of balances) {
         const amount = Number(balance.amount);
+        userMap.set(balance.debtor_id, balance.debtor_name || balance.debtor_id);
+        userMap.set(balance.creditor_id, balance.creditor_name || balance.creditor_id);
 
         netMap.set(
             balance.debtor_id,
@@ -163,48 +334,96 @@ const optimizeBalances = (balances) => {
         );
     }
 
-    const debtors = [];
-    const creditors = [];
+    const participants = [...netMap.entries()]
+        .filter(([, netAmount]) => roundToTwo(netAmount) !== 0)
+        .map(([userId, netAmount]) => ({
+            user_id: userId,
+            user_name: userMap.get(userId) || userId,
+            amount: roundToTwo(netAmount)
+        }));
 
-    for (const [userId, netAmount] of netMap.entries()) {
-        if (netAmount < 0) {
-            debtors.push({ user_id: userId, amount: roundToTwo(Math.abs(netAmount)) });
-        } else if (netAmount > 0) {
-            creditors.push({ user_id: userId, amount: roundToTwo(netAmount) });
-        }
-    }
+    const balancesState = participants.map((participant) => ({
+        ...participant,
+        amount: roundToTwo(participant.amount)
+    }));
 
-    debtors.sort((a, b) => b.amount - a.amount);
-    creditors.sort((a, b) => b.amount - a.amount);
+    let bestTransfers = [];
+    let bestCount = Number.POSITIVE_INFINITY;
 
-    const optimizedPayments = [];
-    let debtorIndex = 0;
-    let creditorIndex = 0;
-
-    while (debtorIndex < debtors.length && creditorIndex < creditors.length) {
-        const debtor = debtors[debtorIndex];
-        const creditor = creditors[creditorIndex];
-        const amount = roundToTwo(Math.min(debtor.amount, creditor.amount));
-
-        optimizedPayments.push({
-            from_user: debtor.user_id,
-            to_user: creditor.user_id,
-            amount
-        });
-
-        debtor.amount = roundToTwo(debtor.amount - amount);
-        creditor.amount = roundToTwo(creditor.amount - amount);
-
-        if (debtor.amount === 0) {
-            debtorIndex += 1;
+    const search = (startIndex, transfers) => {
+        let currentIndex = startIndex;
+        while (currentIndex < balancesState.length && balancesState[currentIndex].amount === 0) {
+            currentIndex += 1;
         }
 
-        if (creditor.amount === 0) {
-            creditorIndex += 1;
+        if (currentIndex === balancesState.length) {
+            if (transfers.length < bestCount) {
+                bestCount = transfers.length;
+                bestTransfers = transfers.map((transfer) => ({ ...transfer }));
+            }
+            return;
         }
-    }
 
-    return optimizedPayments;
+        if (transfers.length >= bestCount) {
+            return;
+        }
+
+        const current = balancesState[currentIndex];
+        const seen = new Set();
+
+        for (let index = currentIndex + 1; index < balancesState.length; index += 1) {
+            const candidate = balancesState[index];
+            if (candidate.amount === 0 || current.amount * candidate.amount >= 0) {
+                continue;
+            }
+
+            const seenKey = `${candidate.amount}`;
+            if (seen.has(seenKey)) {
+                continue;
+            }
+            seen.add(seenKey);
+
+            const transferAmount = roundToTwo(Math.min(Math.abs(current.amount), Math.abs(candidate.amount)));
+            const previousCurrentAmount = current.amount;
+            const previousCandidateAmount = candidate.amount;
+
+            if (current.amount < 0) {
+                current.amount = roundToTwo(current.amount + transferAmount);
+                candidate.amount = roundToTwo(candidate.amount - transferAmount);
+                transfers.push({
+                    from_user: current.user_id,
+                    from_user_name: current.user_name,
+                    to_user: candidate.user_id,
+                    to_user_name: candidate.user_name,
+                    amount: transferAmount
+                });
+            } else {
+                current.amount = roundToTwo(current.amount - transferAmount);
+                candidate.amount = roundToTwo(candidate.amount + transferAmount);
+                transfers.push({
+                    from_user: candidate.user_id,
+                    from_user_name: candidate.user_name,
+                    to_user: current.user_id,
+                    to_user_name: current.user_name,
+                    amount: transferAmount
+                });
+            }
+
+            search(current.amount === 0 ? currentIndex + 1 : currentIndex, transfers);
+
+            transfers.pop();
+            current.amount = previousCurrentAmount;
+            candidate.amount = previousCandidateAmount;
+
+            if (Math.abs(previousCandidateAmount) === transferAmount || Math.abs(previousCurrentAmount) === transferAmount) {
+                continue;
+            }
+        }
+    };
+
+    search(0, []);
+
+    return bestTransfers;
 };
 
 const upsertBalance = async (client, { groupId, debtorId, creditorId, amount }) => {
@@ -687,6 +906,10 @@ const getOptimizedPayments = async (req, res) => {
             original_transfers: balanceResult.rows.length,
             optimized_transfers: optimizedPayments.length,
             reduction: balanceResult.rows.length - optimizedPayments.length,
+            participants: [...new Set([
+                ...balanceResult.rows.map((balance) => balance.debtor_id),
+                ...balanceResult.rows.map((balance) => balance.creditor_id)
+            ])].length,
             payments: optimizedPayments
         });
     } catch (error) {
@@ -696,7 +919,7 @@ const getOptimizedPayments = async (req, res) => {
 
 const getDashboard = async (req, res) => {
     try {
-        const [balanceResult, groupsResult, expensesResult, walletResult, loansResult] = await Promise.all([
+        const [balanceResult, groupsResult, expensesResult, walletResult, loansResult, relationshipDashboard] = await Promise.all([
             getBalancesByUser(req.user.id),
             pool.query(
                 `SELECT COUNT(*) AS total
@@ -723,20 +946,8 @@ const getDashboard = async (req, res) => {
                  LIMIT 1`,
                 [req.user.id]
             ),
-            pool.query(
-                `SELECT
-                    l.id,
-                    l.borrower_id,
-                    l.lender_id,
-                    l.total_amount,
-                    COALESCE(SUM(p.amount), 0) AS total_paid
-                 FROM loans l
-                 LEFT JOIN payments p ON p.loan_id = l.id
-                 WHERE l.status = 'active'
-                   AND (l.borrower_id = $1 OR l.lender_id = $1)
-                 GROUP BY l.id, l.borrower_id, l.lender_id, l.total_amount`,
-                [req.user.id]
-            )
+            getActiveLoansByUser(req.user.id),
+            buildRelationshipDashboard(req.user.id)
         ]);
 
         const summary = balanceResult.rows.reduce(
@@ -793,7 +1004,20 @@ const getDashboard = async (req, res) => {
             balances_count: balanceResult.rows.length,
             total_to_pay: totalToPay,
             total_to_receive: totalToReceive,
-            available_balance: Number(walletResult.rows[0]?.wallet_balance || 0)
+            available_balance: Number(walletResult.rows[0]?.wallet_balance || 0),
+            relationships_count: relationshipDashboard.relationships.length
+        });
+    } catch (error) {
+        return res.status(500).json({ error: error.message });
+    }
+};
+
+const getDashboardRelationships = async (req, res) => {
+    try {
+        const relationshipDashboard = await buildRelationshipDashboard(req.user.id);
+        return res.json({
+            user_id: req.user.id,
+            relationships: relationshipDashboard.relationships
         });
     } catch (error) {
         return res.status(500).json({ error: error.message });
@@ -911,6 +1135,8 @@ const registerPayment = async (req, res) => {
 
         let settlement;
         let resolvedLoanId = loanId;
+        let settlementType = 'direct';
+        let intermediaryUserId = null;
 
         try {
             settlement = await settleBalance(client, {
@@ -933,6 +1159,7 @@ const registerPayment = async (req, res) => {
                     amount: paymentAmount
                 });
                 resolvedLoanId = settlement.loan_id;
+                settlementType = 'loan_payment';
             } catch (loanError) {
                 if (loanError.statusCode !== 400) {
                     throw loanError;
@@ -970,6 +1197,8 @@ const registerPayment = async (req, res) => {
                 }
 
                 settlement = indirectSettlement;
+                settlementType = 'indirect';
+                intermediaryUserId = indirectSettlement.intermediary_user_id;
             }
         }
 
@@ -988,10 +1217,18 @@ const registerPayment = async (req, res) => {
         );
 
         const paymentResult = await client.query(
-            `INSERT INTO payments (loan_id, from_user, to_user, amount)
-             VALUES ($1, $2, $3, $4)
-             RETURNING id, loan_id, from_user, to_user, amount, created_at`,
-            [resolvedLoanId, req.user.id, toUser, paymentAmount]
+            `INSERT INTO payments (
+                loan_id,
+                group_id,
+                from_user,
+                to_user,
+                amount,
+                settlement_type,
+                intermediary_user_id
+            )
+             VALUES ($1, $2, $3, $4, $5, $6, $7)
+             RETURNING id, loan_id, group_id, from_user, to_user, amount, settlement_type, intermediary_user_id, created_at`,
+            [resolvedLoanId, groupId, req.user.id, toUser, paymentAmount, settlementType, intermediaryUserId]
         );
 
         await client.query(
@@ -1033,6 +1270,10 @@ const getMyPayments = async (req, res) => {
             `SELECT
                 p.id,
                 p.loan_id,
+                p.group_id,
+                p.settlement_type,
+                p.intermediary_user_id,
+                intermediary.name AS intermediary_user_name,
                 p.from_user,
                 sender.name AS from_user_name,
                 p.to_user,
@@ -1042,6 +1283,7 @@ const getMyPayments = async (req, res) => {
              FROM payments p
              JOIN users sender ON sender.id = p.from_user
              JOIN users receiver ON receiver.id = p.to_user
+             LEFT JOIN users intermediary ON intermediary.id = p.intermediary_user_id
              WHERE p.from_user = $1
                 OR p.to_user = $1
              ORDER BY p.created_at DESC`,
@@ -1060,6 +1302,7 @@ module.exports = {
     getMyBalances,
     getOptimizedPayments,
     getDashboard,
+    getDashboardRelationships,
     registerPayment,
     getMyPayments
 };
